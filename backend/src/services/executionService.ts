@@ -34,7 +34,9 @@ import { MetaAdsCampaignService } from './metaAdsCampaignService.js';
 import { GoogleAdsSnapshotService } from './googleAdsSnapshotService.js';
 import { MetaAdsSnapshotService } from './metaAdsSnapshotService.js';
 import { StrategyService } from './strategyService.js';
-import { getBusinessProfile } from './businessProfileService.js';
+import { getBusinessProfile, type BusinessProfile } from './businessProfileService.js';
+import { isInstagramImagePreviewEnabled } from '../lib/instagramFeatureFlags.js';
+import { pickBrandImageForInstagramAssist } from './instagramAssistImageService.js';
 
 type ExecutionRow = {
   id: string;
@@ -1009,6 +1011,35 @@ export class ExecutionService {
     return execution;
   }
 
+  private async generateInstagramAssistDeliverable(
+    organizationId: string,
+    action: PlanAction,
+    strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
+    profile: BusinessProfile,
+    businessContext: string | null | undefined
+  ) {
+    const imagePick = await pickBrandImageForInstagramAssist({
+      organizationId,
+      profile,
+      action,
+    });
+
+    return this.claude.generateInstagramAssist({
+      action,
+      goal: strategy.goal,
+      businessContext,
+      image: imagePick
+        ? {
+            url: imagePick.proposedImageUrl,
+            alt: imagePick.imageAlt,
+            source: imagePick.imageSource,
+            attribution: imagePick.imageAttribution,
+            rationale: imagePick.imageRationale,
+          }
+        : null,
+    });
+  }
+
   private async runAssist(
     organizationId: string,
     strategyId: string,
@@ -1030,7 +1061,15 @@ export class ExecutionService {
     const integrations = await this.getIntegrationFlags(organizationId);
 
     let deliverable =
-      intent === 'shopify_blog' && ctx
+      action.channel === 'instagram' && isInstagramImagePreviewEnabled()
+        ? await this.generateInstagramAssistDeliverable(
+            organizationId,
+            action,
+            strategy,
+            profile,
+            businessContext || strategy.context
+          )
+        : intent === 'shopify_blog' && ctx
         ? await this.claude.generateShopifyBlogAssist({
             action,
             goal: strategy.goal,

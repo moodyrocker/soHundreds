@@ -51,6 +51,11 @@ const assistSchema = z.object({
   pasteInstructions: z.string().min(1),
   reasoning: z.string().min(1).optional(),
   shopifyMcpPrompt: z.string().min(1).optional(),
+  proposedImageUrl: z.string().url().optional(),
+  imageSource: z.enum(['shopify', 'unsplash']).optional(),
+  imageAlt: z.string().min(1).optional(),
+  imageAttribution: z.string().min(1).optional(),
+  imageRationale: z.string().min(1).optional(),
 });
 
 export function parseAssistDeliverable(raw: unknown): AssistDeliverable {

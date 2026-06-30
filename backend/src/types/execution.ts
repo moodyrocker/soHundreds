@@ -41,6 +41,12 @@ export interface AssistDeliverable {
   reasoning?: string;
   /** Claude.ai + Shopify MCP prompt for blog/content when write_content unavailable. */
   shopifyMcpPrompt?: string;
+  /** Instagram assist preview — optional proposed image (manual post only). */
+  proposedImageUrl?: string;
+  imageSource?: 'shopify' | 'unsplash';
+  imageAlt?: string;
+  imageAttribution?: string;
+  imageRationale?: string;
 }
 
 export interface ShopifyPageState {

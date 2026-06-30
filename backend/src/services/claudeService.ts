@@ -723,6 +723,82 @@ Rules: Plain text only. Be specific to the action. All extras values must be pla
     return parseAssistJson(text);
   }
 
+  async generateInstagramAssist(input: {
+    action: PlanAction;
+    goal: string;
+    businessContext?: string | null;
+    image?: {
+      url: string;
+      alt: string;
+      source: 'shopify' | 'unsplash';
+      attribution?: string;
+      rationale: string;
+    } | null;
+  }): Promise<AssistDeliverable> {
+    const a = input.action;
+    const imageBlock = input.image
+      ? `
+PROPOSED IMAGE (user will post manually — caption MUST match this image):
+- URL: ${input.image.url}
+- Alt: ${input.image.alt}
+- Source: ${input.image.source}
+${input.image.attribution ? `- Attribution: ${input.image.attribution}` : ''}
+- Why this image: ${input.image.rationale}
+
+Write a caption whose hook and body clearly describe what is in this image. Do not mention unrelated products or generic stock concepts.`
+      : `
+No image was auto-selected — write a caption and note in steps that the user should attach their own product photo.`;
+
+    const prompt = `You prepare Instagram post deliverables for a non-expert founder. Output ONLY valid JSON.
+
+GOAL: ${input.goal}
+BUSINESS: ${input.businessContext || 'Not provided'}
+
+PLAN ACTION:
+- Title: ${a.title}
+- Channel: instagram
+- Why: ${a.why}
+- Outcome: ${a.outcome}
+- KPI: ${a.kpi}
+${imageBlock}
+
+Channel guidance: Write an Instagram caption with hook, body, CTA, and 5-10 hashtags in extras.hashtags. Be specific to the business offer and audience — never generic filler.
+
+Schema:
+{
+  "headline": "one line summary of what you prepared",
+  "primaryCopy": "Instagram caption they copy-paste",
+  "steps": ["numbered micro-steps to finish manually in Instagram, max 5"],
+  "extras": { "hashtags": "space-separated hashtags" },
+  "pasteInstructions": "Instagram or Meta Business Suite → Create post → attach the proposed image (or your own product photo) → paste caption",
+  "reasoning": "2-3 sentences: why this caption and image approach fits the brand and action"
+}
+
+Rules: Plain text only. All extras values must be plain strings. No markdown fences. Do NOT include image URL fields in JSON — those are added separately. Start with {`;
+
+    const message = await this.client.messages.create({
+      model: DEFAULT_MODEL,
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = this.extractTextContent(message);
+    const deliverable = parseAssistJson(text);
+
+    if (input.image) {
+      return {
+        ...deliverable,
+        proposedImageUrl: input.image.url,
+        imageSource: input.image.source,
+        imageAlt: input.image.alt,
+        imageAttribution: input.image.attribution,
+        imageRationale: input.image.rationale,
+      };
+    }
+
+    return deliverable;
+  }
+
   async generateAdvertPlanAssist(input: {
     action: PlanAction;
     goal: string;
