@@ -2,15 +2,19 @@
 
 Goal-driven marketing operator — **weekly autopilot toward a measurable goal** (decision layer + real data, not another dashboard).
 
+### Documentation
+
+**→ [docs/DOCUMENTATION.md](./docs/DOCUMENTATION.md)** — full index of product, integrations, Autopilot, Meta/Instagram, and engineering docs.
+
 | Doc | Purpose |
 |-----|---------|
-| **[PROJECT_PLAN.md](./PROJECT_PLAN.md)** | Vision, true north, anti-drift guardrails, roadmap |
-| **[INTEGRATIONS_SETUP.md](./INTEGRATIONS_SETUP.md)** | **Connect GA, Google Ads, Meta, Shopify** (OAuth, `.env`, ngrok, troubleshooting) |
-| **[MCP_ARCHITECTURE.md](./MCP_ARCHITECTURE.md)** | **MCP tiers — analytics core + bridges** |
-| **[SHOPIFY_MCP_ARCHITECTURE.md](./SHOPIFY_MCP_ARCHITECTURE.md)** | Shopify MCP bridge detail |
-| **[BASELINE_ASSESSMENT.md](./BASELINE_ASSESSMENT.md)** | **Current status baseline** (what’s connected, what’s next) |
-| **[TASKS_AND_TESTS.md](./TASKS_AND_TESTS.md)** | Task list, milestones, phase gates, manual test playbook |
-| **[BUILD_PLAN.md](./BUILD_PLAN.md)** | Engineering phases, checklists, env vars, file map |
+| **[docs/DOCUMENTATION.md](./docs/DOCUMENTATION.md)** | **All docs in one place** |
+| **[docs/ORIGIN_AND_STATUS.md](./docs/ORIGIN_AND_STATUS.md)** | Original goal vs today (go-live map) |
+| **[docs/META_FACEBOOK_INSTAGRAM_CAPABILITIES.md](./docs/META_FACEBOOK_INSTAGRAM_CAPABILITIES.md)** | Facebook vs Instagram posts & ads |
+| **[INTEGRATIONS_SETUP.md](./INTEGRATIONS_SETUP.md)** | Connect GA, Meta, Shopify (OAuth, `.env`) |
+| **[PROJECT_PLAN.md](./PROJECT_PLAN.md)** | Vision, true north, roadmap |
+| **[TASKS_AND_TESTS.md](./TASKS_AND_TESTS.md)** | Milestones and manual test playbook |
+| **[MCP_ARCHITECTURE.md](./MCP_ARCHITECTURE.md)** | MCP tiers and bridges |
 | **[README.md](./README.md)** | How to run the stack (this file) |
 
 Stack: **Supabase** (Postgres + Auth), **Express API**, **Next.js** web, **Docker Compose**.
@@ -216,7 +220,7 @@ npm install
 npm run dev    # http://localhost:5000
 ```
 
-Routes: `/` (dashboard), `/new` (goal input), `/thinking`, `/plan`.
+Routes: `/` (Autopilot), `/new` (goal input), `/thinking`, `/plan` (Control room).
 
 ## Integrations (Google, Meta, Shopify)
 

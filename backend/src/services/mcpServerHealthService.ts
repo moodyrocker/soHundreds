@@ -14,7 +14,11 @@ import { ShopifyMcpService } from './shopifyMcpService.js';
 import { invokeShopifyMcpTool } from '../mcp/shopifyMcpTools.js';
 import { mcpUnsplashHealthProbe } from '../mcp/unsplashMcpTools.js';
 import { isUnsplashConfigured } from '../lib/unsplashClient.js';
+import { mcpCanvaHealthProbe } from '../mcp/canvaMcpTools.js';
+import { mcpRunwayHealthProbe } from '../mcp/runwayMcpTools.js';
+import { isRunwayConfigured } from '../lib/runwayClient.js';
 import { mcpInstagramHealthProbe } from '../mcp/instagramMcpTools.js';
+import { mcpMailchimpHealth } from '../mcp/mailchimpMcpTools.js';
 
 export type McpServerToolInfo = {
   name: string;
@@ -57,6 +61,17 @@ const TOOLS_BY_PLATFORM: Record<MCPPlatform, McpServerToolInfo[]> = {
     { name: 'get_photo', description: 'Photo by ID with attribution' },
     { name: 'track_download', description: 'Required download tracking' },
   ],
+  canva: [
+    { name: 'list_designs', description: 'List Canva designs for the connected user' },
+    { name: 'create_instagram_design', description: 'Create 1080x1080 Instagram design' },
+    { name: 'export_design', description: 'Export design to PNG/JPG/MP4 download URL' },
+  ],
+  runway: [
+    { name: 'text_to_video', description: 'Generate 9:16 AI video from text prompt' },
+    { name: 'image_to_video', description: 'Animate an image into a Reel video' },
+    { name: 'get_task', description: 'Poll generation task status' },
+    { name: 'generate_instagram_reel', description: 'One-shot Reel video URL for Instagram' },
+  ],
   instagram: [
     { name: 'get_profile', description: 'Business profile (username, followers)' },
     { name: 'list_media', description: 'Recent posts and reels' },
@@ -69,6 +84,13 @@ const TOOLS_BY_PLATFORM: Record<MCPPlatform, McpServerToolInfo[]> = {
     { name: 'like_media', description: 'Like a post (write — gated)' },
     { name: 'get_media_insights', description: 'Post engagement metrics' },
   ],
+  mailchimp: [
+    { name: 'health', description: 'Ping account and list audiences' },
+    { name: 'list_audiences', description: 'List Mailchimp audiences' },
+    { name: 'ensure_audience', description: 'Find or create an audience' },
+    { name: 'upsert_member', description: 'Add or update a subscriber' },
+    { name: 'create_draft_campaign', description: 'Create draft email campaign (never sends)' },
+  ],
 };
 
 function bridgePath(platform: MCPPlatform): string {
@@ -78,7 +100,10 @@ function bridgePath(platform: MCPPlatform): string {
     meta_ads: '/mcp/meta-ads',
     shopify: '/mcp/shopify',
     unsplash: '/mcp/unsplash',
+    canva: '/mcp/canva',
+    runway: '/mcp/runway',
     instagram: '/mcp/instagram',
+    mailchimp: '/mcp/mailchimp',
   };
   return paths[platform];
 }
@@ -159,6 +184,31 @@ async function fetchSnapshotExcerpt(
         error: null,
       };
     }
+    if (platform === 'canva') {
+      const ctx = await new MCPConnectionService().getCanvaContext(organizationId);
+      if (!ctx) {
+        return { ok: false, excerpt: null, error: 'Canva not connected for this workspace' };
+      }
+      const text = await mcpCanvaHealthProbe(ctx);
+      const parsed = JSON.parse(text) as { ok: boolean; sampleDesignId: string | null };
+      return {
+        ok: parsed.ok,
+        excerpt: `Canva API ok · sample design ${parsed.sampleDesignId ?? 'n/a'}`,
+        error: null,
+      };
+    }
+    if (platform === 'runway') {
+      if (!isRunwayConfigured()) {
+        return { ok: false, excerpt: null, error: 'RUNWAY_API_KEY not configured' };
+      }
+      const text = await mcpRunwayHealthProbe();
+      const parsed = JSON.parse(text) as { ok: boolean; apiHost?: string };
+      return {
+        ok: parsed.ok,
+        excerpt: `Runway API ok · ${parsed.apiHost ?? 'api.dev.runwayml.com'}`,
+        error: null,
+      };
+    }
     if (platform === 'instagram') {
       const ctx = await new MCPConnectionService().getInstagramContext(organizationId);
       if (!ctx) {
@@ -178,6 +228,26 @@ async function fetchSnapshotExcerpt(
       return {
         ok: parsed.ok,
         excerpt: `@${parsed.username ?? ctx.username ?? 'unknown'} · ${parsed.followersCount ?? '?'} followers · ${parsed.mediaCount ?? '?'} posts`,
+        error: null,
+      };
+    }
+    if (platform === 'mailchimp') {
+      const ctx = await new MCPConnectionService().getMailchimpContext(organizationId);
+      if (!ctx) {
+        return { ok: false, excerpt: null, error: 'Mailchimp not connected for this workspace' };
+      }
+      const text = await mcpMailchimpHealth(ctx);
+      const parsed = JSON.parse(text) as {
+        ok: boolean;
+        accountName?: string;
+        audienceCount?: number;
+        defaultListId?: string | null;
+      };
+      return {
+        ok: parsed.ok,
+        excerpt: `${parsed.accountName ?? 'Mailchimp'} · ${parsed.audienceCount ?? 0} audiences${
+          parsed.defaultListId ? ' · default list set' : ' · pick a default audience'
+        }`,
         error: null,
       };
     }
@@ -206,8 +276,14 @@ export class McpServerHealthService {
       let connectionReady = false;
       if (def.platform === 'unsplash') {
         connectionReady = isUnsplashConfigured();
+      } else if (def.platform === 'runway') {
+        connectionReady = isRunwayConfigured();
+      } else if (def.platform === 'canva') {
+        connectionReady = await this.mcp.isCanvaReady(organizationId);
       } else if (def.platform === 'instagram') {
         connectionReady = await this.mcp.isInstagramReady(organizationId);
+      } else if (def.platform === 'mailchimp') {
+        connectionReady = await this.mcp.isMailchimpReady(organizationId);
       } else {
         connectionReady = row ? isConnectionReady(def.platform, row) : false;
       }

@@ -136,7 +136,7 @@ Sign up → Workspace → Business profile + Connect (integrations)
 | **New goal** (`/new`) | Capture goal; starts background generation | **Yes** |
 | **Connect** (`/integrations`) | OAuth for data sources | Setup |
 | **Business** (`/business`) | Workspace context for decisions | Setup |
-| **Full plan / History** (`/plan`) | Past weeks, refine, advanced execution | No |
+| **Control room** (`/plan`) | Past weeks, refine, advanced execution | No |
 | **Thinking** (`/thinking`) | Legacy/debug; generation runs without it | No |
 | **Check-up** (`/checkup`) | Read-only snapshot report | No |
 
@@ -258,6 +258,7 @@ Autopilot Home (this week + why + confidence)
 | **PROJECT_PLAN.md** (this file) | Vision, true north, anti-drift, roadmap |
 | **[BUILD_PLAN.md](./BUILD_PLAN.md)** | Engineering phases & exit criteria |
 | **[TASKS_AND_TESTS.md](./TASKS_AND_TESTS.md)** | Milestones, gates, test scripts |
+| **[docs/AUTOPILOT_V1_OPERATING_SPEC.md](./docs/AUTOPILOT_V1_OPERATING_SPEC.md)** | Decision thresholds, pause triggers, confidence gates |
 | **[BASELINE_ASSESSMENT.md](./BASELINE_ASSESSMENT.md)** | Integration + workspace snapshot |
 | **[INTEGRATIONS_SETUP.md](./INTEGRATIONS_SETUP.md)** | OAuth runbook |
 | **[README.md](./README.md)** | Run locally |

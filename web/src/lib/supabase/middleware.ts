@@ -38,13 +38,18 @@ export async function updateSession(request: NextRequest) {
 
   // getUser validates the session server-side; getSession alone can leave stale cookies
   // that bounce /login ↔ / (refresh_token_not_found loop).
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError && shouldClearAuthSession(userError)) {
-    await supabase.auth.signOut();
+  let user: Awaited<ReturnType<typeof supabase.auth.getUser>>['data']['user'] = null;
+  try {
+    const result = await supabase.auth.getUser();
+    user = result.data.user;
+    if (result.error && shouldClearAuthSession(result.error)) {
+      await supabase.auth.signOut();
+      user = null;
+    }
+  } catch {
+    // Network/DNS blips to Supabase must not clear cookies or force /login —
+    // that creates a bounce loop when Docker DNS briefly fails.
+    return supabaseResponse;
   }
 
   const isAuthRoute =

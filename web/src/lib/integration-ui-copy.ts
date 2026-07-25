@@ -11,6 +11,10 @@ export const INTEGRATION_UNAVAILABLE = {
     'Shopify is not available on your workspace yet. Contact support to enable store linking.',
   unsplash:
     'Unsplash is not enabled yet. Your administrator needs to add UNSPLASH_ACCESS_KEY on the server.',
+  canva:
+    'Canva is not available yet. Your workspace needs CANVA_CLIENT_ID and CANVA_CLIENT_SECRET configured.',
+  runway:
+    'Runway is not enabled yet. Your administrator needs to add RUNWAY_API_KEY from https://dev.runwayml.com/.',
   instagram:
     'Instagram publishing is not available yet. Your workspace needs Meta OAuth configured.',
   comingSoon: 'This integration is on our roadmap. You can still get strong plans using the sources above.',
@@ -27,8 +31,14 @@ export const INTEGRATION_HELP = {
     'Enter your Shopify store address (from your admin URL), then approve read-only access.',
   unsplash:
     'Enabled workspace-wide. Claude can search photos and embed them in Shopify blog posts with attribution.',
+  canva:
+    'Connect your Canva account — the agent can create Instagram-sized designs, export PNG, then publish via Instagram MCP. Before connecting: in canva.dev → your integration → Scopes, enable design:meta:read, design:content:read, design:content:write, and profile:read.',
+  runway:
+    'Enabled workspace-wide with API credits. Claude can generate 9:16 AI videos and publish them as Instagram Reels.',
   instagram:
     'Connect with Instagram Business Login — sign in as @keylo.london. No Facebook Page picker needed.',
+  mailchimp:
+    'Paste your Mailchimp API key (Account → Extras → API keys — must end with your datacenter, e.g. -us21), then pick the audience for campaign drafts.',
 } as const;
 
 export const INTEGRATION_QUICK_LINKS = {
@@ -52,9 +62,21 @@ export const INTEGRATION_QUICK_LINKS = {
     label: 'Unsplash Developers',
     href: 'https://unsplash.com/developers',
   },
+  canva: {
+    label: 'Canva Developer Portal',
+    href: 'https://www.canva.dev/',
+  },
+  runway: {
+    label: 'Runway Developer Portal',
+    href: 'https://dev.runwayml.com/',
+  },
   instagram: {
     label: 'Meta Business Suite',
     href: 'https://business.facebook.com/latest/home',
+  },
+  mailchimp: {
+    label: 'Mailchimp API keys',
+    href: 'https://admin.mailchimp.com/account/api/',
   },
 } as const;
 
@@ -70,10 +92,15 @@ export function googleAdsConsoleUrl(customerId?: string | null): string {
   return `https://ads.google.com/aw/campaigns?ocid=${id}`;
 }
 
-export function metaAdsConsoleUrl(adAccountId?: string | null): string {
+export function metaAdsConsoleUrl(
+  adAccountId?: string | null,
+  campaignId?: string | null
+): string {
   if (!adAccountId) return INTEGRATION_QUICK_LINKS.metaAds.href;
   const id = adAccountId.replace(/^act_/, '');
-  return `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${id}`;
+  const base = `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${id}`;
+  if (!campaignId) return base;
+  return `${base}&selected_campaign_ids=${campaignId}`;
 }
 
 export function shopifyAdminUrl(shopDomain?: string | null): string {

@@ -82,6 +82,26 @@ export const MCP_PLATFORM_REGISTRY: McpPlatformDefinition[] = [
     resolvePublicUrl: () => mcpBridgePublicUrl('unsplash'),
   },
   {
+    platform: 'canva',
+    serverName: 'canva',
+    tier: 'actuation',
+    deployMode: 'hundres_bridge',
+    label: 'Canva',
+    feedsPlans: false,
+    supportsWrites: true,
+    resolvePublicUrl: () => mcpBridgePublicUrl('canva'),
+  },
+  {
+    platform: 'runway',
+    serverName: 'runway',
+    tier: 'actuation',
+    deployMode: 'hundres_bridge',
+    label: 'Runway',
+    feedsPlans: false,
+    supportsWrites: true,
+    resolvePublicUrl: () => mcpBridgePublicUrl('runway'),
+  },
+  {
     platform: 'instagram',
     serverName: 'instagram',
     tier: 'actuation',
@@ -90,6 +110,16 @@ export const MCP_PLATFORM_REGISTRY: McpPlatformDefinition[] = [
     feedsPlans: false,
     supportsWrites: true,
     resolvePublicUrl: () => mcpBridgePublicUrl('instagram'),
+  },
+  {
+    platform: 'mailchimp',
+    serverName: 'mailchimp',
+    tier: 'actuation',
+    deployMode: 'hundres_bridge',
+    label: 'Mailchimp',
+    feedsPlans: false,
+    supportsWrites: true,
+    resolvePublicUrl: () => mcpBridgePublicUrl('mailchimp'),
   },
 ];
 

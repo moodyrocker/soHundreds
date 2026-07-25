@@ -7,9 +7,14 @@ export interface MCPConnectionStatus {
   adAccountId: string | null;
   pageId: string | null;
   instagramUsername: string | null;
+  canvaDisplayName: string | null;
   shopDomain: string | null;
+  mailchimpAccountName?: string | null;
+  mailchimpListId?: string | null;
+  mailchimpListName?: string | null;
   grantedScopes: string | null;
   ready: boolean;
+  lastSyncAt: string | null;
 }
 
 export interface MCPStatusResponse {
@@ -19,15 +24,22 @@ export interface MCPStatusResponse {
   hasMetaAds: boolean;
   hasShopify: boolean;
   hasUnsplash: boolean;
+  hasRunway: boolean;
+  hasCanva: boolean;
   hasInstagram: boolean;
+  hasMailchimp?: boolean;
+  canvaConnectConfigured?: boolean;
   instagramBusinessLoginConfigured?: boolean;
   googleOAuthConfigured: boolean;
   googleAdsConfigured: boolean;
   metaOAuthConfigured: boolean;
   shopifyConfigured: boolean;
   unsplashConfigured: boolean;
+  runwayConfigured: boolean;
+  mailchimpConfigured?: boolean;
   googleOAuthRedirectUri: string | null;
   metaOAuthRedirectUri: string | null;
+  canvaOAuthRedirectUri?: string | null;
 }
 
 export interface GoogleAdsCustomer {
@@ -73,7 +85,10 @@ export type SnapshotPlatform =
   | 'meta_ads'
   | 'shopify'
   | 'unsplash'
-  | 'instagram';
+  | 'canva'
+  | 'runway'
+  | 'instagram'
+  | 'mailchimp';
 
 export interface SnapshotProbeResult {
   platform: SnapshotPlatform;
@@ -178,6 +193,13 @@ export function getInstagramOAuthUrl(
   });
 }
 
+export function getCanvaOAuthUrl(token: string, organizationId: string) {
+  return apiFetch<{ url: string }>('/api/mcp/oauth/canva', {
+    token,
+    organizationId,
+  });
+}
+
 export function getMetaAdsOAuthUrl(
   token: string,
   organizationId: string,
@@ -208,7 +230,7 @@ export function getShopifyOAuthUrl(
 export function connectMcpPlatform(
   token: string,
   organizationId: string,
-  platform: 'google_analytics' | 'google_ads' | 'meta_ads' | 'shopify' | 'instagram',
+  platform: 'google_analytics' | 'google_ads' | 'meta_ads' | 'shopify' | 'canva' | 'instagram',
   oauthCode: string,
   options?: { shop?: string }
 ) {
@@ -221,6 +243,52 @@ export function connectMcpPlatform(
       oauthCode,
       ...(options?.shop ? { shop: options.shop } : {}),
     }),
+  });
+}
+
+export function connectMailchimp(
+  token: string,
+  organizationId: string,
+  apiKey: string,
+  defaultListId?: string
+) {
+  return apiFetch<{
+    success: boolean;
+    platform: string;
+    accountName?: string;
+    lists?: Array<{ id: string; name: string }>;
+  }>('/api/mcp/connect', {
+    method: 'POST',
+    token,
+    organizationId,
+    body: JSON.stringify({
+      platform: 'mailchimp',
+      apiKey,
+      ...(defaultListId ? { defaultListId } : {}),
+    }),
+  });
+}
+
+export function listMailchimpAudiences(token: string, organizationId: string) {
+  return apiFetch<{
+    audiences: Array<{ id: string; name: string; memberCount: number }>;
+  }>('/api/mcp/mailchimp/audiences', {
+    token,
+    organizationId,
+  });
+}
+
+export function setMailchimpAudience(
+  token: string,
+  organizationId: string,
+  listId: string,
+  listName?: string
+) {
+  return apiFetch<{ success: boolean; listId: string }>('/api/mcp/mailchimp/audience', {
+    method: 'PUT',
+    token,
+    organizationId,
+    body: JSON.stringify({ listId, ...(listName ? { listName } : {}) }),
   });
 }
 

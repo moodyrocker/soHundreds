@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const { organizationId, platform } = parseOAuthState(state);
+  const { organizationId, platform, codeVerifier } = parseOAuthState(state);
 
   if (platform === 'shopify' && !shop) {
     return NextResponse.redirect(
@@ -76,20 +76,52 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(integrationsUrl(request, oauthSuccessQuery(platform)));
   }
 
-  const connectRes = await fetch(`${apiOrigin()}/api/mcp/connect`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.access_token}`,
-      'X-Organization-Id': organizationId,
-    },
-    body: JSON.stringify({
-      platform,
-      oauthCode: code,
-      ...(shop ? { shop } : {}),
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
+  if (platform === 'canva' && !codeVerifier) {
+    return NextResponse.redirect(
+      integrationsUrl(
+        request,
+        `oauth_error=${encodeURIComponent(
+          'Canva login was missing the PKCE verifier. Click Connect Canva again from Integrations.'
+        )}`
+      )
+    );
+  }
+
+  let connectRes: Response | null = null;
+  let lastConnectError = 'Connection failed';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      connectRes = await fetch(`${apiOrigin()}/api/mcp/connect`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+          'X-Organization-Id': organizationId,
+        },
+        body: JSON.stringify({
+          platform,
+          oauthCode: code,
+          ...(codeVerifier ? { codeVerifier } : {}),
+          ...(shop ? { shop } : {}),
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      break;
+    } catch (err) {
+      lastConnectError =
+        err instanceof Error ? err.message : 'Could not reach the API to finish connecting';
+      console.error(`[oauth/callback] connect attempt ${attempt + 1} failed:`, lastConnectError);
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      }
+    }
+  }
+
+  if (!connectRes) {
+    return NextResponse.redirect(
+      integrationsUrl(request, `oauth_error=${encodeURIComponent(lastConnectError)}`)
+    );
+  }
 
   if (!connectRes.ok) {
     const message = await readConnectError(connectRes);

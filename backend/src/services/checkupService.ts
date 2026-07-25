@@ -1,3 +1,4 @@
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import { query } from '../database/connection.js';
 import type { CheckupDocument } from '../types/checkup.js';
 import type { SnapshotProbeResult } from '../types/snapshot.js';
@@ -91,7 +92,8 @@ export class CheckupService {
     const meta = connections.find((c) => c.platform === 'meta_ads');
     const shopify = connections.find((c) => c.platform === 'shopify');
     const hasProperty = Boolean(analytics?.propertyId);
-    const hasAdsCustomer = Boolean(ads?.config?.customerId);
+    const hasAdsCustomer =
+      isGoogleAdsEnabled() && Boolean(ads?.config?.customerId);
     const hasMetaAccount = Boolean(meta?.config?.adAccountId);
     const hasShop = Boolean(shopify?.config?.shopDomain);
 

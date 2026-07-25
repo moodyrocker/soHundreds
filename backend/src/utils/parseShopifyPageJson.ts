@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ShopifyPageState } from '../types/execution.js';
+import { isShopifyAutoPublishLiveEnabled } from '../lib/contentPublishFeatureFlags.js';
 import { sanitizeModelStrings } from './stripModelMarkup.js';
 import { extractJsonFromModelText } from './parsePlanJson.js';
 
@@ -54,7 +55,7 @@ export function parseShopifyPageJson(text: string): ShopifyPageState {
     bodyHtml,
     seoTitle: clean.seoTitle,
     seoDescription: clean.seoDescription,
-    isPublished: false,
+    isPublished: isShopifyAutoPublishLiveEnabled(),
     reasoning: clean.reasoning,
   };
 }

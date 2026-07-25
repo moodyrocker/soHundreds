@@ -14,6 +14,7 @@ import type {
 
 import { decrypt, encrypt } from '../utils/encryption.js';
 import { getMcpDefinition } from '../lib/mcpRegistry.js';
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import { mcpBridgePublicUrl } from '../lib/mcpBridgeToken.js';
 import {
   resolveInstagramBusinessAccount,
@@ -28,6 +29,13 @@ import {
   isInstagramBusinessLoginConfigured,
   refreshInstagramBusinessToken,
 } from '../lib/instagramBusinessLogin.js';
+import {
+  buildCanvaAuthorizeUrl,
+  exchangeCanvaCode,
+  generateCanvaPkce,
+  isCanvaConnectConfigured,
+  refreshCanvaToken,
+} from '../lib/canvaConnect.js';
 
 const META_GRAPH_VERSION = process.env.META_GRAPH_API_VERSION ?? 'v21.0';
 
@@ -75,7 +83,10 @@ const PLATFORM_URLS: Record<MCPPlatform, string> = {
   meta_ads: platformUrl('meta_ads'),
   shopify: platformUrl('shopify'),
   unsplash: platformUrl('unsplash'),
+  canva: platformUrl('canva'),
+  runway: platformUrl('runway'),
   instagram: platformUrl('instagram'),
+  mailchimp: platformUrl('mailchimp'),
 };
 
 const PLATFORM_NAMES: Record<MCPPlatform, string> = {
@@ -84,7 +95,10 @@ const PLATFORM_NAMES: Record<MCPPlatform, string> = {
   meta_ads: platformName('meta_ads'),
   shopify: platformName('shopify'),
   unsplash: platformName('unsplash'),
+  canva: platformName('canva'),
+  runway: platformName('runway'),
   instagram: platformName('instagram'),
+  mailchimp: platformName('mailchimp'),
 };
 
 const DEFAULT_SHOPIFY_SCOPES = 'read_orders,read_products,read_content,write_content,write_products';
@@ -100,7 +114,11 @@ export function isGoogleOAuthConfigured(): boolean {
 }
 
 export function isGoogleAdsConfigured(): boolean {
-  return Boolean(isGoogleOAuthConfigured() && process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
+  return Boolean(
+    isGoogleAdsEnabled() &&
+      isGoogleOAuthConfigured() &&
+      process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim()
+  );
 }
 
 export function isMetaOAuthConfigured(): boolean {
@@ -127,7 +145,11 @@ export function isUnsplashMcpConfigured(): boolean {
   return Boolean(process.env.UNSPLASH_ACCESS_KEY?.trim());
 }
 
-export { isInstagramBusinessLoginConfigured };
+export function isRunwayMcpConfigured(): boolean {
+  return Boolean(process.env.RUNWAY_API_KEY?.trim());
+}
+
+export { isInstagramBusinessLoginConfigured, isCanvaConnectConfigured };
 
 export function isConnectionReady(
   platform: MCPPlatform,
@@ -137,7 +159,11 @@ export function isConnectionReady(
   if (platform === 'google_ads') return Boolean(row.config?.customerId);
   if (platform === 'meta_ads') return Boolean(row.config?.adAccountId);
   if (platform === 'shopify') return Boolean(row.config?.shopDomain);
+  if (platform === 'canva') return Boolean(row.config?.canvaUserId);
   if (platform === 'instagram') return Boolean(row.config?.instagramBusinessAccountId);
+  if (platform === 'mailchimp') {
+    return Boolean(row.config?.mailchimpDatacenter && row.config?.mailchimpListId);
+  }
   return false;
 }
 
@@ -161,6 +187,7 @@ type ConnectionRow = {
   credentials_encrypted: string;
   property_id: string | null;
   config: MCPConnectionConfig | null;
+  last_sync_at?: Date | null;
 };
 
 export class MCPConnectionService {
@@ -198,7 +225,7 @@ export class MCPConnectionService {
 
   async getConnectionRows(organizationId: string): Promise<ConnectionRow[]> {
     const result = await query<ConnectionRow>(
-      `SELECT id, platform, credentials_encrypted, property_id, config
+      `SELECT id, platform, credentials_encrypted, property_id, config, last_sync_at
        FROM mcp_connections
        WHERE organization_id = $1 AND status = 'connected'`,
       [organizationId]
@@ -245,6 +272,32 @@ export class MCPConnectionService {
       instagramUsername: username,
       instagramLoginMethod: 'instagram_business',
     });
+  }
+
+  /** Canva Connect OAuth (PKCE) — design create/export for Instagram workflow. */
+  async connectCanva(
+    organizationId: string,
+    oauthCode: string,
+    codeVerifier: string
+  ): Promise<void> {
+    const { tokens, profile } = await exchangeCanvaCode(oauthCode, codeVerifier);
+    await this.upsertConnection(organizationId, 'canva', tokens, true, {
+      canvaUserId: profile.id,
+      canvaDisplayName: profile.displayName,
+    });
+  }
+
+  getCanvaOAuthAuthorizeUrl(organizationId: string): { url: string; codeVerifier: string } {
+    if (!isCanvaConnectConfigured()) {
+      throw new Error(
+        'Canva Connect is not configured. Set CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and redirect URI in .env.'
+      );
+    }
+
+    const { codeVerifier, codeChallenge } = generateCanvaPkce();
+    const state = formatOAuthState(organizationId, 'canva', { codeVerifier });
+    const url = buildCanvaAuthorizeUrl({ organizationId, state, codeChallenge });
+    return { url, codeVerifier };
   }
 
   getInstagramOAuthAuthorizeUrl(
@@ -786,6 +839,131 @@ export class MCPConnectionService {
     }
   }
 
+  async getCanvaContext(organizationId: string): Promise<{ accessToken: string } | null> {
+    const row = await this.getConnectionRow(organizationId, 'canva');
+    if (!row?.config?.canvaUserId) return null;
+
+    const credentials = await this.ensureValidTokens(
+      organizationId,
+      'canva',
+      row.credentials_encrypted
+    );
+    return { accessToken: credentials.access_token };
+  }
+
+  async isCanvaReady(organizationId: string): Promise<boolean> {
+    try {
+      const ctx = await this.getCanvaContext(organizationId);
+      return ctx !== null;
+    } catch (err) {
+      console.warn('[canva] readiness check failed:', err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
+  async connectMailchimp(
+    organizationId: string,
+    apiKey: string,
+    opts?: { defaultListId?: string | null }
+  ): Promise<{ accountName: string; datacenter: string; lists: Array<{ id: string; name: string }> }> {
+    const { parseMailchimpApiKey, mailchimpPing, mailchimpListAudiences } = await import(
+      '../lib/mailchimpClient.js'
+    );
+    const parsed = parseMailchimpApiKey(apiKey);
+    const ctx = {
+      apiKey: parsed.apiKey,
+      datacenter: parsed.datacenter,
+      defaultListId: opts?.defaultListId ?? null,
+    };
+    const ping = await mailchimpPing(ctx);
+    const lists = await mailchimpListAudiences(ctx);
+    const defaultList =
+      (opts?.defaultListId && lists.find((l) => l.id === opts.defaultListId)) || lists[0] || null;
+
+    await this.upsertConnection(
+      organizationId,
+      'mailchimp',
+      { access_token: parsed.apiKey, token_type: 'Bearer' },
+      true,
+      {
+        mailchimpDatacenter: parsed.datacenter,
+        mailchimpAccountName: ping.accountName,
+        mailchimpListId: defaultList?.id,
+        mailchimpListName: defaultList?.name,
+      }
+    );
+
+    return {
+      accountName: ping.accountName,
+      datacenter: parsed.datacenter,
+      lists: lists.map((l) => ({ id: l.id, name: l.name })),
+    };
+  }
+
+  async getMailchimpContext(organizationId: string): Promise<import('../lib/mailchimpClient.js').MailchimpContext | null> {
+    const row = await this.getConnectionRow(organizationId, 'mailchimp');
+    if (!row?.config?.mailchimpDatacenter) return null;
+    const credentials = await this.ensureValidTokens(
+      organizationId,
+      'mailchimp',
+      row.credentials_encrypted
+    );
+    return {
+      apiKey: credentials.access_token,
+      datacenter: row.config.mailchimpDatacenter,
+      defaultListId: row.config.mailchimpListId ?? null,
+      accountName: row.config.mailchimpAccountName ?? null,
+    };
+  }
+
+  async isMailchimpReady(organizationId: string): Promise<boolean> {
+    try {
+      const ctx = await this.getMailchimpContext(organizationId);
+      return Boolean(ctx?.defaultListId);
+    } catch (err) {
+      console.warn(
+        '[mailchimp] readiness check failed:',
+        err instanceof Error ? err.message : err
+      );
+      return false;
+    }
+  }
+
+  async setMailchimpDefaultList(
+    organizationId: string,
+    listId: string,
+    listName?: string
+  ): Promise<void> {
+    const id = listId.trim();
+    if (!id) throw new Error('Mailchimp audience id is required');
+
+    let name = listName?.trim() || null;
+    if (!name) {
+      const ctx = await this.getMailchimpContext(organizationId);
+      if (!ctx) throw new Error('Mailchimp is not connected');
+      const { mailchimpListAudiences } = await import('../lib/mailchimpClient.js');
+      const lists = await mailchimpListAudiences(ctx);
+      name = lists.find((l) => l.id === id)?.name ?? null;
+    }
+
+    const result = await query(
+      `UPDATE mcp_connections
+       SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb, last_sync_at = NOW()
+       WHERE organization_id = $2 AND platform = 'mailchimp' AND status = 'connected'`,
+      [
+        JSON.stringify({
+          mailchimpListId: id,
+          ...(name ? { mailchimpListName: name } : {}),
+        }),
+        organizationId,
+      ]
+    );
+
+    if (result.rowCount === 0) {
+      throw new Error('Mailchimp is not connected');
+    }
+  }
+
   async listGoogleAdsCustomers(organizationId: string): Promise<GoogleAdsCustomerSummary[]> {
     const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
     if (!devToken) {
@@ -918,7 +1096,20 @@ export class MCPConnectionService {
       return refreshed;
     }
 
+    if (platform === 'canva') {
+      if (!credentials.refresh_token) {
+        throw new Error('Canva access token expired — reconnect Canva in Integrations');
+      }
+      const refreshed = await refreshCanvaToken(credentials.refresh_token);
+      await this.updateCredentials(organizationId, platform, refreshed);
+      return refreshed;
+    }
+
     if (platform === 'shopify') {
+      return credentials;
+    }
+
+    if (platform === 'mailchimp') {
       return credentials;
     }
 

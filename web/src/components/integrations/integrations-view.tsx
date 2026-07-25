@@ -36,6 +36,9 @@ import { MetaAdsSection } from '@/components/integrations/meta-ads-section';
 import { IntegrationUnavailable } from '@/components/integrations/integration-unavailable';
 import { ShopifySection } from '@/components/integrations/shopify-section';
 import { UnsplashSection } from '@/components/integrations/unsplash-section';
+import { CanvaSection } from '@/components/integrations/canva-section';
+import { RunwaySection } from '@/components/integrations/runway-section';
+import { MailchimpSection } from '@/components/integrations/mailchimp-section';
 import { InstagramSection } from '@/components/integrations/instagram-section';
 import { INTEGRATION_HELP, INTEGRATION_UNAVAILABLE, INTEGRATION_QUICK_LINKS, googleAnalyticsConsoleUrl } from '@/lib/integration-ui-copy';
 import { IntegrationOAuthActions } from '@/components/integrations/integration-oauth-actions';
@@ -298,7 +301,12 @@ export function IntegrationsView() {
   useEffect(() => {
     const oauthError = searchParams.get('oauth_error');
     if (oauthError) {
-      setError(decodeURIComponent(oauthError));
+      const decoded = decodeURIComponent(oauthError);
+      const scopesHint =
+        /scope/i.test(decoded)
+          ? ' Enable these scopes on canva.dev → your integration → Scopes: design:meta:read, design:content:read, design:content:write, profile:read — then try Connect Canva again.'
+          : '';
+      setError(`${decoded}${scopesHint}`);
       router.replace('/integrations');
       return;
     }
@@ -316,6 +324,10 @@ export function IntegrationsView() {
     }
     if (searchParams.get('connected_instagram') === '1') {
       setNotice('Instagram connected. @keylo.london is ready for MCP publishing.');
+      router.replace('/integrations');
+    }
+    if (searchParams.get('connected_canva') === '1') {
+      setNotice('Canva connected. Create designs and export for Instagram publishing.');
       router.replace('/integrations');
     }
     if (searchParams.get('connected_shopify') === '1') {
@@ -374,7 +386,12 @@ export function IntegrationsView() {
   };
 
   const niceToHave = NICE_TO_HAVE_INTEGRATIONS.filter(
-    (i) => i.id !== 'unsplash' && i.id !== 'instagram'
+    (i) =>
+      i.id !== 'unsplash' &&
+      i.id !== 'canva' &&
+      i.id !== 'runway' &&
+      i.id !== 'instagram' &&
+      i.id !== 'mailchimp'
   );
   const requiredExceptBuiltIn = REQUIRED_INTEGRATIONS.filter(
     (i) =>
@@ -596,11 +613,12 @@ export function IntegrationsView() {
       </div>
 
       <div className="h-eyebrow" style={{ marginBottom: 12 }}>
-        Content ({2})
+        Content &amp; email ({5})
       </div>
       <p className="t-dim" style={{ fontSize: 14, marginTop: 0, marginBottom: 16, maxWidth: 560 }}>
-        Stock imagery and organic social publishing. Unsplash is workspace-wide; Instagram uses your
-        Meta login and linked Business account.
+        Stock imagery, Canva design, Runway AI video, organic social publishing, and Mailchimp
+        email drafts. Unsplash and Runway are workspace-wide API keys; Canva, Instagram, and
+        Mailchimp are per-workspace.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 32 }}>
@@ -611,12 +629,35 @@ export function IntegrationsView() {
           mcpLoading={mcpLoading}
           mcpServer={serverFor('unsplash', mcpServers)}
         />
+        <CanvaSection
+          status={status}
+          capability={capabilities.canva}
+          loading={pageLoading}
+          mcpLoading={mcpLoading}
+          mcpServer={serverFor('canva', mcpServers)}
+          onRefresh={() => void load()}
+        />
+        <RunwaySection
+          status={status}
+          capability={capabilities.runway}
+          loading={pageLoading}
+          mcpLoading={mcpLoading}
+          mcpServer={serverFor('runway', mcpServers)}
+        />
         <InstagramSection
           status={status}
           capability={capabilities.instagram}
           loading={pageLoading}
           mcpLoading={mcpLoading}
           mcpServer={serverFor('instagram', mcpServers)}
+          onRefresh={() => void load()}
+        />
+        <MailchimpSection
+          status={status}
+          capability={capabilities.mailchimp}
+          loading={pageLoading}
+          mcpLoading={mcpLoading}
+          mcpServer={serverFor('mailchimp', mcpServers)}
           onRefresh={() => void load()}
         />
       </div>

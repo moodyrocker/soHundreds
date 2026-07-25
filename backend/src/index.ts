@@ -9,6 +9,10 @@ import { createMCPRouter } from './routes/mcp.js';
 import { createOrganizationsRouter } from './routes/organizations.js';
 import { createStrategyRouter } from './routes/strategy.js';
 import { createBusinessProfileRouter } from './routes/businessProfile.js';
+import { createContentRecipesRouter } from './routes/contentRecipes.js';
+import { createBrandVisualsRouter } from './routes/brandVisuals.js';
+import { createRunwayPromptTestsRouter } from './routes/runwayPromptTests.js';
+import { createAdCampaignsRouter } from './routes/adCampaigns.js';
 import { createCheckupRouter } from './routes/checkup.js';
 import { createExecutionRouter } from './routes/execution.js';
 import { mountAllMcpBridges } from './mcp/mountMcpBridges.js';
@@ -71,6 +75,10 @@ tenantRoutes.use('/mcp', (req, res, next) => {
 tenantRoutes.use('/mcp', createMCPRouter());
 tenantRoutes.use('/strategy', createStrategyRouter());
 tenantRoutes.use('/business-profile', createBusinessProfileRouter());
+tenantRoutes.use('/content-recipes', createContentRecipesRouter());
+tenantRoutes.use('/brand-visuals', createBrandVisualsRouter());
+tenantRoutes.use('/runway-tests', createRunwayPromptTestsRouter());
+tenantRoutes.use('/ad-campaigns', createAdCampaignsRouter());
 tenantRoutes.use('/checkup', createCheckupRouter());
 tenantRoutes.use('/execution', createExecutionRouter());
 app.use('/api', tenantRoutes);
@@ -111,4 +119,12 @@ app.use(
 
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
+  void import('./workers/autopilotCycleWorker.js')
+    .then(({ startAutopilotCycleWorker }) => startAutopilotCycleWorker())
+    .catch((err) => {
+      console.error(
+        '[autopilot-cycle] failed to start worker:',
+        err instanceof Error ? err.message : err
+      );
+    });
 });

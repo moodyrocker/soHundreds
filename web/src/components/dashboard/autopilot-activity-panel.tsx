@@ -4,7 +4,9 @@ import { useState } from 'react';
 import { Chip } from '@/components/hundres/chip';
 import { SnapshotDataViewer } from '@/components/dashboard/snapshot-data-viewer';
 import type { AutopilotActivityRecord } from '@/lib/autopilot-activity';
+import { dedupeActivities, humanActivityLine, sortActivitiesNewestFirst } from '@/lib/activity-human';
 import type { SnapshotPreflightLine } from '@/lib/execution';
+import { formatDateTime } from '@/lib/format-datetime';
 
 type Props = {
   activities: AutopilotActivityRecord[];
@@ -18,14 +20,6 @@ function statusVariant(status: AutopilotActivityRecord['status']) {
   if (status === 'running') return 'accent' as const;
   if (status === 'warn') return 'warn' as const;
   return 'default' as const;
-}
-
-function formatTime(iso: string) {
-  try {
-    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  } catch {
-    return '';
-  }
 }
 
 function isReasoningStep(step: string) {
@@ -47,6 +41,7 @@ function stepLabel(step: string) {
 
 export function AutopilotActivityPanel({ activities, running, snapshots }: Props) {
   const [expandedDataId, setExpandedDataId] = useState<string | null>(null);
+  const lines = sortActivitiesNewestFirst(dedupeActivities(activities));
 
   const snapshotForActivity = (item: AutopilotActivityRecord): SnapshotPreflightLine | null => {
     if (item.step !== 'data_pull' || !snapshots?.length) return null;
@@ -81,7 +76,7 @@ export function AutopilotActivityPanel({ activities, running, snapshots }: Props
         {running ? (
           <>
             <div className="thinking-pulse" style={{ width: 8, height: 8 }} />
-            <Chip variant="accent">Running</Chip>
+            <Chip variant="accent">Agent running</Chip>
           </>
         ) : null}
       </div>
@@ -93,15 +88,15 @@ export function AutopilotActivityPanel({ activities, running, snapshots }: Props
           padding: '8px 0',
         }}
       >
-        {activities.length === 0 ? (
+        {lines.length === 0 ? (
           <p className="t-dim" style={{ fontSize: 13, margin: 0, padding: '12px 14px', lineHeight: 1.5 }}>
             {running
-              ? 'Autopilot is starting…'
-              : 'Run autopilot to see reasoning and decisions here.'}
+              ? 'Agent is starting — steps will appear here in a few seconds…'
+              : 'Click Run this action on any task, or Run agent for this week. Reasoning and progress show here in real time.'}
           </p>
         ) : (
           <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-            {activities.map((item) => {
+            {lines.map((item) => {
               const snapshotLine = snapshotForActivity(item);
               const showFullData = expandedDataId === item.id && snapshotLine?.text;
 
@@ -126,14 +121,14 @@ export function AutopilotActivityPanel({ activities, running, snapshots }: Props
                     {stepLabel(item.step)}
                   </Chip>
                   <span className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', marginLeft: 'auto' }}>
-                    {formatTime(item.createdAt)}
+                    {formatDateTime(item.createdAt)}
                   </span>
                 </div>
                 <div style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.4, marginBottom: 4 }}>
                   {item.title}
                 </div>
                 <p className="t-dim" style={{ fontSize: 12, margin: 0, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                  {item.detail}
+                  {humanActivityLine(item)}
                 </p>
                 {snapshotLine?.text ? (
                   <div style={{ marginTop: 8 }}>

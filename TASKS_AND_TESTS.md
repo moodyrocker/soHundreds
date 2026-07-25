@@ -9,6 +9,7 @@
 | [README.md](./README.md) — run the stack |
 | [INTEGRATIONS_SETUP.md](./INTEGRATIONS_SETUP.md) — connect GA, Ads, Meta, Shopify |
 | [BASELINE_ASSESSMENT.md](./BASELINE_ASSESSMENT.md) — current status snapshot (2026-06-04) |
+| [docs/V1_READINESS_TRACKING.md](./docs/V1_READINESS_TRACKING.md) — **V1 + Keylo test tracker** (M7, P4, conversion suite) |
 
 **How to use:** Work top-down by phase. Do not mark a phase **Complete** until every task is checked **and** every test in that phase’s gate is **Pass**.
 
@@ -60,7 +61,7 @@ docker compose exec api node /app/apply-pending-migrations.mjs
 
 **Current focus:** Phase **5C** (metric check vs goal) + **5D** (execution intent). Do not add features outside [PROJECT_PLAN.md anti-drift](./PROJECT_PLAN.md#anti-drift-guardrails).
 
-**External blockers (parallel):** Shopify `write_products` (Test P4); Google Ads Basic Access **submitted 2026-06-13**, **pending as of 2026-06-25** (1C-U5).
+**External blockers (parallel):** Google Ads Basic Access **submitted 2026-06-13**, **pending** (deferred from V1 suite).
 
 ---
 
@@ -75,7 +76,7 @@ docker compose exec api node /app/apply-pending-migrations.mjs
 | **M4** | Market-aware plans | ✅ **Verified** | Phase 2 gate Pass (Test P2) |
 | **M4B** | Refineable plans | ✅ **Verified** | Phase 2B gate Pass (Test P2B) |
 | **M5** | Traceable decisions (audit) | ✅ **Verified** 2026-06-07 | Phase 3 gate Pass (Test P3) |
-| **M6** | Safe execution | **Deferred** | Test P4 Pass when Shopify `write_products` available |
+| **M6** | Safe execution | **Verified** 2026-07-07 | Test P4 Pass on Keylo (dry-run, execute, audit, rollback) |
 | **M7** | **Goal loop (autopilot)** | **Next** | Phase 5 gate Pass — metric check → next week or goal met on Keylo |
 
 ---
@@ -84,13 +85,13 @@ docker compose exec api node /app/apply-pending-migrations.mjs
 
 Advance to Phase 5E / new executors only when all Pass:
 
-- [ ] New goal → Autopilot Home (not Thinking-first)
-- [ ] Week 1 + `goalTarget` in plan summary
-- [ ] Autopilot prepares this week’s actions (≥80% success rate)
-- [ ] Metric read compares to `goalTarget` (GA and/or Shopify)
-- [ ] System advances to week 2 OR sets `goal_status = met` with reason
-- [ ] SEO/content actions route to assist — not wrong Shopify product
-- [ ] User can complete happy path without opening Full plan
+- [x] New goal → Autopilot Home (not Thinking-first)
+- [x] Week 1 + `goalTarget` in plan summary
+- [x] Autopilot prepares this week’s actions (≥80% success rate)
+- [x] Metric read compares to `goalTarget` (GA and/or Shopify and/or Instagram)
+- [x] System advances to week 2 OR sets `goal_status = met` with reason
+- [x] SEO/content actions route to assist — not wrong Shopify product
+- [x] User can complete happy path without opening Full plan
 
 **Test script (Keylo / MIA):**
 
@@ -281,7 +282,7 @@ Advance to Phase 5E / new executors only when all Pass:
 | 4.2 | Audit log: before/after on writes | [x] |
 | 4.3 | Rollback for Shopify toolkit mutations | [x] |
 | 4.4 | Dry-run preview before commit | [x] |
-| 4.T1 | Run [Phase 4 tests](#test-p4) | [ ] **Skipped** — Shopify `write_products` pending app review |
+| 4.T1 | Run [Phase 4 tests](#test-p4) | [x] **Pass** Keylo 2026-07-07 |
 
 ---
 
@@ -490,20 +491,20 @@ docker compose exec api node -e "
 
 <a id="test-p4"></a>
 
-### Test P4 — Phase 4 (Shopify SEO v1) ⏸ SKIPPED
+### Test P4 — Phase 4 (Shopify SEO v1) ✅ Pass (Keylo 2026-07-07)
 
-**Status:** Deferred 2026-06-08 — Shopify Partners app not reviewed; `write_products` not available on production store install. **Dry-run preview** can still be tested; approve/rollback waits on scope.
+**Status:** **Pass 4/4** on Keylo — dry-run, execute, audit log, rollback verified by user.
 
 **Setup (when unblocked):** Shopify connected with **write_products** scope. Active plan with an SEO or content action.
 
 | # | Steps | Expected | Pass? |
 |---|--------|----------|-------|
-| P4-1 | `/plan` → expand SEO/content action → **Hundres do this for me** | Dry-run modal shows before/after SEO fields; nothing written yet | [ ] optional (preview-only OK now) |
-| P4-2 | **Approve & run** | Shopify product SEO updates; action shows **Executed** | [ ] blocked |
-| P4-3 | SQL: `SELECT event_type, metadata FROM audit_log WHERE event_type = 'action_executed' ORDER BY created_at DESC LIMIT 1` | Row with before/after in metadata | [ ] blocked |
-| P4-4 | **Rollback change** on same action | Shopify SEO restored; status **Rolled back** | [ ] blocked |
+| P4-1 | `/plan` → expand SEO/content action → **Hundres do this for me** | Dry-run modal shows before/after SEO fields; nothing written yet | [x] |
+| P4-2 | **Approve & run** | Shopify product SEO updates; action shows **Executed** | [x] |
+| P4-3 | SQL: `SELECT event_type, metadata FROM audit_log WHERE event_type = 'action_executed' ORDER BY created_at DESC LIMIT 1` | Row with before/after in metadata | [x] |
+| P4-4 | **Rollback change** on same action | Shopify SEO restored; status **Rolled back** | [x] |
 
-**Unblock:** Partners → enable `write_products` → dev store or custom distribution → disconnect & reconnect in Integrations → re-run P4-2–P4-4.
+**Verified on Keylo:** `write_products` + `write_content` scopes; full approve → audit → rollback path confirmed.
 
 ---
 
@@ -565,8 +566,7 @@ docker compose exec api node -e "
 5. ~~**Phase 2B**~~ — Refine plan UI + API + Test P2B Pass.
 6. **Google Ads** — When Basic Access approved, re-test Ads snapshot → full `multi`.
 7. ~~**Phase 3**~~ — Workers + audit + Test P3 Pass (2026-06-07).
-8. ~~**Phase 4 code**~~ — Gated execution shipped; **Test P4 deferred** (Shopify `write_products`).
-9. **When Shopify unblocks** — Reconnect store → run P4-2–P4-4 → close **M6**.
+8. ~~**Phase 4 / M6**~~ — Test P4 **Pass** on Keylo 2026-07-07.
 
 ---
 

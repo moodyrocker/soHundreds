@@ -617,7 +617,7 @@ export function PlanView() {
                 disabled={batchRunning || !strategy?.id}
                 onClick={() => void onRunWeek(planWeeks[0].week)}
               >
-                {batchRunning ? 'Preparing week 1…' : 'Hundres prepare week 1'}
+                {batchRunning ? 'Agent running…' : 'Run agent for week 1'}
               </Button>
               <p className="auth-hint" style={{ margin: 0, fontSize: 12, alignSelf: 'center' }}>
                 Generates deliverables for every week-1 action (Instagram, email, SEO, paid, etc.).
@@ -727,7 +727,7 @@ export function PlanView() {
                                 <Icon name="sparkle" style={{ width: 12, height: 12 }} />
                                 {execution?.status === 'executed' || execution?.status === 'previewed'
                                   ? 'Open deliverable'
-                                  : 'Hundres do this for me'}
+                                  : 'Run this action'}
                               </Button>
                               <p className="auth-hint" style={{ marginTop: 8, marginBottom: 0, fontSize: 11.5 }}>
                                 AI prepares copy and steps automatically. Shopify SEO/content can auto-apply when write access is granted.

@@ -3,29 +3,43 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AutopilotPreflightPanel } from '@/components/dashboard/autopilot-preflight-panel';
+import { AgentLogsPanel } from '@/components/dashboard/agent-logs-panel';
+import { ProgressChartsPanel } from '@/components/dashboard/progress-charts-panel';
 import { AutopilotActionTable } from '@/components/dashboard/autopilot-action-table';
-import { AutopilotActivityPanel } from '@/components/dashboard/autopilot-activity-panel';
-import { Button } from '@/components/hundres/button';
+import { resolveAgentStatus } from '@/lib/agent-status';
+import { sanitizeAgentCopy } from '@/lib/plain-language';
 import { Card } from '@/components/hundres/card';
 import { Chip } from '@/components/hundres/chip';
 import { Icon } from '@/components/hundres/icon';
 import { ApiError } from '@/lib/api';
 import { type AutopilotMode, getBusinessProfile, updateBusinessProfile } from '@/lib/business-profile';
 import { CHANNELS, type ChannelId } from '@/lib/channels';
-import { listExecutions, previewExecution, approveExecution, runWeekExecutions, type AutopilotPreflight, type ExecutionRecord } from '@/lib/execution';
+import { listExecutions, runWeekExecutions, approveExecution, type AutopilotPreflight, type ExecutionRecord } from '@/lib/execution';
+import {
+  confirmOrchestratorAction,
+  getOrchestratorSnapshot,
+  runContinuousAutopilot,
+  runSequentialWeek,
+  type ActionRunState,
+  type OrchestratorSnapshot,
+} from '@/lib/orchestrator';
 import {
   listAutopilotActivity,
   type AutopilotActivityRecord,
 } from '@/lib/autopilot-activity';
-import { getGoalProgress, type GoalProgress, type WeekOutcome } from '@/lib/goal-progress';
 import { type StrategyRecord } from '@/lib/plan-types';
-import { advanceStrategyWeek, getActiveStrategy, getActionCompletions, setActionCompletion } from '@/lib/strategy';
+import { getActiveStrategy, getActionCompletions, setActionCompletion } from '@/lib/strategy';
+import { getProgressDashboard, type ProgressChartCard } from '@/lib/progress-dashboard';
 import { useAuth } from '@/providers/auth-provider';
 import { useStrategyGeneration } from '@/providers/strategy-generation-provider';
 
 function channelLabel(channel: string) {
   const id = channel as ChannelId;
   return CHANNELS[id]?.label ?? channel;
+}
+
+function displayGoalLine(goalLine: string): string {
+  return sanitizeAgentCopy(goalLine.trim());
 }
 
 export function DashboardView() {
@@ -41,19 +55,17 @@ export function DashboardView() {
     new Map()
   );
   const [batchRunning, setBatchRunning] = useState(false);
-  const [advancing, setAdvancing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [goalProgress, setGoalProgress] = useState<GoalProgress | null>(null);
-  const [weekOutcomes, setWeekOutcomes] = useState<WeekOutcome[]>([]);
-  const [progressLoading, setProgressLoading] = useState(false);
   const [activities, setActivities] = useState<AutopilotActivityRecord[]>([]);
   const [preflight, setPreflight] = useState<AutopilotPreflight | null>(null);
   const [preflightConfirmed, setPreflightConfirmed] = useState(false);
-  const [preflightLoading, setPreflightLoading] = useState(false);
   const [completedActionIds, setCompletedActionIds] = useState<Set<string>>(new Set());
   const [completionSaving, setCompletionSaving] = useState<string | null>(null);
-  const [restartingActionId, setRestartingActionId] = useState<string | null>(null);
   const [approvingActionId, setApprovingActionId] = useState<string | null>(null);
+  const [orchestratorState, setOrchestratorState] = useState<OrchestratorSnapshot | null>(null);
+  const [confirmingOrchestratorId, setConfirmingOrchestratorId] = useState<string | null>(null);
+  const [progressCharts, setProgressCharts] = useState<ProgressChartCard[]>([]);
+  const [progressLoading, setProgressLoading] = useState(false);
 
   const name = user?.email?.split('@')[0] ?? 'there';
 
@@ -99,20 +111,33 @@ export function DashboardView() {
     [accessToken, activeOrganization]
   );
 
-  const loadGoalProgress = useCallback(
+  const loadOrchestrator = useCallback(
+    async (strategyId: string, week: number) => {
+      if (!accessToken || !activeOrganization) return;
+      try {
+        const snapshot = await getOrchestratorSnapshot(
+          accessToken,
+          activeOrganization.id,
+          strategyId,
+          week
+        );
+        setOrchestratorState(snapshot);
+      } catch {
+        setOrchestratorState(null);
+      }
+    },
+    [accessToken, activeOrganization]
+  );
+
+  const loadProgressDashboard = useCallback(
     async (strategyId: string) => {
       if (!accessToken || !activeOrganization) return;
       setProgressLoading(true);
       try {
-        const { progress, outcomes } = await getGoalProgress(
-          accessToken,
-          activeOrganization.id,
-          strategyId
-        );
-        setGoalProgress(progress);
-        setWeekOutcomes(outcomes);
+        const { charts } = await getProgressDashboard(accessToken, activeOrganization.id, strategyId);
+        setProgressCharts(charts);
       } catch {
-        setGoalProgress(null);
+        setProgressCharts([]);
       } finally {
         setProgressLoading(false);
       }
@@ -134,8 +159,11 @@ export function DashboardView() {
       if (record?.id) {
         await Promise.all([
           loadExecutions(record.id),
-          loadGoalProgress(record.id),
           loadActivities(record.id),
+          loadProgressDashboard(record.id),
+          record.plan
+            ? loadOrchestrator(record.id, record.currentWeek)
+            : Promise.resolve(),
         ]);
       }
       return record;
@@ -147,7 +175,7 @@ export function DashboardView() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, activeOrganization, loadActivities, loadExecutions, loadGoalProgress, loadStrategy]);
+  }, [accessToken, activeOrganization, loadActivities, loadExecutions, loadOrchestrator, loadProgressDashboard, loadStrategy]);
 
   useEffect(() => {
     void refresh();
@@ -159,7 +187,7 @@ export function DashboardView() {
       clearCompleted();
       if (record?.id && record.plan) {
         const week = record.currentWeek;
-        setPreflightLoading(true);
+        setBatchRunning(true);
         try {
           const response = await runWeekExecutions(
             accessToken,
@@ -173,23 +201,35 @@ export function DashboardView() {
         } catch {
           /* preflight optional */
         } finally {
-          setPreflightLoading(false);
+          setBatchRunning(false);
         }
       }
     });
   }, [completedId, refresh, clearCompleted, accessToken, activeOrganization, loadActivities]);
 
   useEffect(() => {
-    if (!strategy?.id || (!batchRunning && !isGenerating)) return;
+    const agentActive = batchRunning || isGenerating;
+    if (!strategy?.id || !agentActive) return;
+    const strategyId = strategy.id;
+    const week = strategy.currentWeek;
 
     const poll = () => {
-      void loadActivities(strategy.id);
-      void loadExecutions(strategy.id);
+      void loadActivities(strategyId);
+      void loadExecutions(strategyId);
+      void loadOrchestrator(strategyId, week);
     };
     poll();
-    const interval = setInterval(poll, 1500);
+    const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
-  }, [strategy?.id, batchRunning, isGenerating, loadActivities, loadExecutions]);
+  }, [
+    strategy?.id,
+    strategy?.currentWeek,
+    batchRunning,
+    isGenerating,
+    loadActivities,
+    loadExecutions,
+    loadOrchestrator,
+  ]);
 
   useEffect(() => {
     if (!strategy?.id || batchRunning || isGenerating) return;
@@ -208,18 +248,42 @@ export function DashboardView() {
   const currentWeekBlock = strategy?.plan?.weeks.find((w) => w.week === strategy?.currentWeek);
   const hasPlan = Boolean(strategy?.plan && currentWeekBlock);
   const goalMet = strategy?.goalStatus === 'met';
-  const goalTarget = strategy?.plan?.summary.goalTarget;
 
-  const weekProgress = useMemo(() => {
-    if (!currentWeekBlock) return { ready: 0, completed: 0, total: 0 };
-    const total = currentWeekBlock.actions.length;
-    const ready = currentWeekBlock.actions.filter((a) => {
-      const ex = executionsByAction.get(a.id);
-      return ex && (ex.status === 'executed' || ex.status === 'previewed');
-    }).length;
-    const completed = currentWeekBlock.actions.filter((a) => completedActionIds.has(a.id)).length;
-    return { ready, completed, total };
-  }, [currentWeekBlock, executionsByAction, completedActionIds]);
+  const orchestratorByAction = useMemo(() => {
+    const map = new Map<string, ActionRunState>();
+    for (const row of orchestratorState?.actions ?? []) {
+      map.set(row.actionId, row);
+    }
+    return map;
+  }, [orchestratorState]);
+
+  const agentStatus = useMemo(
+    () =>
+      resolveAgentStatus({
+        strategy,
+        orchestratorState,
+        batchRunning,
+        isGenerating,
+        activities,
+        executionsByAction,
+      }),
+    [strategy, orchestratorState, batchRunning, isGenerating, activities, executionsByAction]
+  );
+
+  const latestRunningActivity = useMemo(() => {
+    const runningRows = activities.filter((a) => {
+      if (a.status !== 'running') return false;
+      if (a.actionId) {
+        const ex = executionsByAction.get(a.actionId);
+        if (ex?.status === 'executed' || ex?.status === 'skipped') return false;
+      }
+      return true;
+    });
+    if (!runningRows.length) return null;
+    return runningRows.reduce((best, row) =>
+      row.createdAt > best.createdAt ? row : best
+    );
+  }, [activities, executionsByAction]);
 
   const onToggleActionComplete = async (actionId: string) => {
     if (!accessToken || !activeOrganization || !strategy?.id) return;
@@ -258,32 +322,6 @@ export function DashboardView() {
     }
   };
 
-  const onRestartAction = async (actionId: string) => {
-    if (!accessToken || !activeOrganization || !strategy?.id || restartingActionId) return;
-    setRestartingActionId(actionId);
-    setNotice(null);
-    try {
-      const result = await previewExecution(
-        accessToken,
-        activeOrganization.id,
-        strategy.id,
-        actionId
-      );
-      setExecutionsByAction((prev) => {
-        const next = new Map(prev);
-        next.set(actionId, result.execution);
-        return next;
-      });
-      await loadActivities(strategy.id);
-      setNotice('Deliverable regenerated for this action.');
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : 'Could not restart this action');
-      await loadActivities(strategy.id);
-    } finally {
-      setRestartingActionId(null);
-    }
-  };
-
   const onApproveAction = async (actionId: string, executionId: string) => {
     if (!accessToken || !activeOrganization || !strategy?.id || approvingActionId) return;
     setApprovingActionId(actionId);
@@ -301,11 +339,13 @@ export function DashboardView() {
       });
       await loadActivities(strategy.id);
       setNotice(
-        updated.executionType === 'create_meta_ads_campaign'
-          ? 'Campaign created paused in Meta Ads Manager — open Meta to review and start when ready.'
-          : updated.executionType === 'create_google_ads_campaign'
-          ? 'Campaign created paused in Google Ads — open Google Ads to review and start when ready.'
-          : 'Change applied successfully.'
+        updated.status === 'executed'
+          ? updated.executionType === 'create_meta_ads_campaign'
+            ? 'Campaign created paused in Meta Ads — open Meta to review and start when ready.'
+            : updated.executionType === 'create_google_ads_campaign'
+            ? 'Campaign created paused in Google Ads — open Google Ads to review and start when ready.'
+            : 'Created in your store successfully.'
+          : 'Action ready — expand the row to review before applying.'
       );
     } catch (err) {
       setNotice(err instanceof Error ? err.message : 'Could not approve this action');
@@ -329,27 +369,68 @@ export function DashboardView() {
     }
   };
 
-  const onAdvanceWeek = async () => {
-    if (!accessToken || !activeOrganization || !strategy?.id) return;
-    setAdvancing(true);
+  const onConfirmOrchestratorAction = async (actionId: string) => {
+    if (!accessToken || !activeOrganization || !strategy?.id || !currentWeekBlock) return;
+    setConfirmingOrchestratorId(actionId);
+    setBatchRunning(true);
     setNotice(null);
     try {
-      const { strategy: updated } = await advanceStrategyWeek(
+      let snapshot = await confirmOrchestratorAction(
         accessToken,
         activeOrganization.id,
-        strategy.id
+        strategy.id,
+        currentWeekBlock.week,
+        actionId
       );
-      setStrategy(updated);
-      await Promise.all([loadExecutions(updated.id), loadGoalProgress(updated.id), loadActivities(updated.id)]);
-      if (updated.goalStatus === 'met') {
-        setNotice('Goal met — Hundres reached your target.');
+      setOrchestratorState(snapshot);
+      let resolvedWeek = currentWeekBlock.week;
+
+      if (autopilotMode === 'hands_off') {
+        const continuous = await runContinuousAutopilot(
+          accessToken,
+          activeOrganization.id,
+          strategy.id,
+          currentWeekBlock.week,
+          { handsOff: true }
+        );
+        snapshot = continuous.snapshot;
+        setOrchestratorState(snapshot);
+        if (continuous.strategy) {
+          resolvedWeek = continuous.strategy.currentWeek;
+          setStrategy((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  currentWeek: continuous.strategy!.currentWeek,
+                  goalStatus: continuous.strategy!.goalStatus as typeof prev.goalStatus,
+                }
+              : prev
+          );
+        }
+      }
+
+      await Promise.all([
+        loadExecutions(strategy.id),
+        loadActivities(strategy.id),
+        loadOrchestrator(strategy.id, resolvedWeek),
+      ]);
+
+      if (snapshot.block?.status === 'checkpoint') {
+        setNotice(
+          sanitizeAgentCopy(
+            snapshot.block.checkpointReasoning ?? 'Round of tasks complete — moving to the next ones.'
+          )
+        );
+      } else if (snapshot.actions.some((a) => a.runStatus === 'awaiting_human_action')) {
+        setNotice('Paused campaign is in Ads Manager — review it, then mark done to continue.');
       } else {
-        setNotice(`Week ${updated.currentWeek} is being prepared toward your goal.`);
+        setNotice('Action confirmed — agent continuing sequentially.');
       }
     } catch (err) {
-      setNotice(err instanceof Error ? err.message : 'Could not advance to next week');
+      setNotice(err instanceof Error ? err.message : 'Could not confirm action');
     } finally {
-      setAdvancing(false);
+      setConfirmingOrchestratorId(null);
+      setBatchRunning(false);
     }
   };
 
@@ -369,7 +450,7 @@ export function DashboardView() {
       setPreflight(response.preflight);
       if (response.phase === 'preflight') {
         setPreflightConfirmed(false);
-        setNotice('Review live data above, then confirm to prepare this week\'s actions.');
+        setNotice('Review live data above, then confirm to prepare your next tasks.');
         await loadActivities(strategy.id);
         return;
       }
@@ -381,9 +462,15 @@ export function DashboardView() {
         }
         return next;
       });
-      const ok = response.results.filter((r) => r.ok).length;
-      setNotice(`Autopilot prepared ${ok} of ${response.results.length} actions for this week.`);
-      await Promise.all([loadGoalProgress(strategy.id), loadActivities(strategy.id)]);
+      await loadActivities(strategy.id);
+      const created = response.results.filter((r) => r.execution?.status === 'executed').length;
+      const prepared = response.results.filter((r) => r.ok).length;
+      setNotice(
+        created > 0
+          ? `Agent created ${created} item(s) in your accounts (campaigns start paused). ${prepared} of ${response.results.length} actions processed.`
+          : `Agent processed ${prepared} of ${response.results.length} actions. Connect Meta Ads or Shopify write access to auto-create campaigns and store pages.`
+      );
+      await loadActivities(strategy.id);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Autopilot run failed';
       await Promise.all([loadExecutions(strategy.id), loadActivities(strategy.id)]);
@@ -399,11 +486,87 @@ export function DashboardView() {
     }
   };
 
-  const onRunAutopilot = () => void runAutopilotBatch(false);
-  const onConfirmPreflight = () => void runAutopilotBatch(true);
+  const onConfirmPreflight = async () => {
+    if (!accessToken || !activeOrganization || !strategy?.id || !currentWeekBlock) return;
+    setBatchRunning(true);
+    setNotice(null);
+    void loadActivities(strategy.id);
+    try {
+      let snapshot: OrchestratorSnapshot;
+      let weekForOrchestrator = currentWeekBlock.week;
+      if (autopilotMode === 'hands_off') {
+        const result = await runContinuousAutopilot(
+          accessToken,
+          activeOrganization.id,
+          strategy.id,
+          currentWeekBlock.week,
+          { handsOff: true }
+        );
+        snapshot = result.snapshot;
+        setOrchestratorState(snapshot);
+        if (result.strategy) {
+          weekForOrchestrator = result.strategy.currentWeek;
+          setStrategy((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  currentWeek: result.strategy!.currentWeek,
+                  goalStatus: result.strategy!.goalStatus as typeof prev.goalStatus,
+                }
+              : prev
+          );
+        }
+      } else {
+        snapshot = await runSequentialWeek(
+          accessToken,
+          activeOrganization.id,
+          strategy.id,
+          currentWeekBlock.week
+        );
+        setOrchestratorState(snapshot);
+      }
+      setPreflightConfirmed(true);
+      await Promise.all([
+        loadExecutions(strategy.id),
+        loadActivities(strategy.id),
+        loadOrchestrator(strategy.id, weekForOrchestrator),
+      ]);
+
+      const waitingHuman = snapshot.actions.filter(
+        (a) => a.runStatus === 'awaiting_human_action'
+      );
+      const failed = snapshot.actions.filter((a) => a.runStatus === 'failed');
+
+      if (failed.length) {
+        setNotice(`Agent halted — ${failed[0].errorMessage ?? 'action failed'}.`);
+      } else if (waitingHuman.length) {
+        setNotice(
+          'Paused campaign is in Ads Manager — review it, turn on spend when ready, then mark done to continue.'
+        );
+      } else if (snapshot.block?.status === 'checkpoint') {
+        setNotice(
+          sanitizeAgentCopy(
+            snapshot.block.checkpointReasoning ?? 'Round of tasks complete — moving to the next ones.'
+          )
+        );
+      } else {
+        const confirmed = snapshot.actions.filter((a) => a.runStatus === 'confirmed').length;
+        setNotice(`Sequential agent confirmed ${confirmed} of ${snapshot.actions.length} actions.`);
+      }
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : 'Sequential run failed');
+      await loadExecutions(strategy.id);
+    } finally {
+      setBatchRunning(false);
+    }
+  };
+
   const onRefreshPreflight = () => void runAutopilotBatch(false);
 
-  const showWorking = isGenerating || batchRunning || advancing || preflightLoading;
+  const agentActivelyExecuting =
+    isGenerating ||
+    (batchRunning && Boolean(latestRunningActivity?.actionId)) ||
+    Boolean(latestRunningActivity?.status === 'running' && latestRunningActivity?.actionId);
 
   return (
     <>
@@ -412,26 +575,28 @@ export function DashboardView() {
           <div className="h-eyebrow" style={{ marginBottom: 12 }}>
             Autopilot
           </div>
-          <h1 className="h-display">Hi, {name}.</h1>
+          <p className="t-dim" style={{ fontSize: 15, margin: '0 0 8px', maxWidth: 720 }}>
+            Hi, {name}.
+          </p>
           {loading ? (
-            <p className="t-dim" style={{ fontSize: 17, marginTop: 10, maxWidth: 560 }}>
+            <p className="t-dim" style={{ fontSize: 17, marginTop: 4, maxWidth: 720 }}>
               Loading…
             </p>
           ) : isGenerating ? (
-            <p className="t-dim" style={{ fontSize: 17, marginTop: 10, maxWidth: 560 }}>
-              Hundres is analyzing your goal and preparing this week&apos;s work automatically.
+            <p className="t-dim" style={{ fontSize: 17, marginTop: 4, maxWidth: 720 }}>
+              Hundres is analyzing your goal and preparing your first tasks automatically.
             </p>
           ) : goalMet ? (
-            <p className="t-dim" style={{ fontSize: 17, marginTop: 10, maxWidth: 560 }}>
-              Goal reached — {strategy!.plan!.summary.goalLine}
-            </p>
+            <h1 className="h-display" style={{ fontWeight: 700, maxWidth: 900, lineHeight: 1.15 }}>
+              Goal reached — {displayGoalLine(strategy!.plan!.summary.goalLine)}
+            </h1>
           ) : hasPlan ? (
-            <p className="t-dim" style={{ fontSize: 17, marginTop: 10, maxWidth: 560 }}>
-              {strategy!.plan!.summary.goalLine}
-            </p>
+            <h1 className="h-display" style={{ fontWeight: 700, maxWidth: 900, lineHeight: 1.15 }}>
+              {displayGoalLine(strategy!.plan!.summary.goalLine)}
+            </h1>
           ) : (
-            <p className="t-dim" style={{ fontSize: 17, marginTop: 10, maxWidth: 560 }}>
-              Tell us your goal — Hundres keeps working week by week until it&apos;s met.
+            <p className="t-dim" style={{ fontSize: 17, marginTop: 4, maxWidth: 720 }}>
+              Tell us your goal — Hundres keeps working until it&apos;s met.
             </p>
           )}
         </div>
@@ -460,7 +625,7 @@ export function DashboardView() {
               <div>
                 <div style={{ fontWeight: 500, marginBottom: 4 }}>Building your plan</div>
                 <p className="t-dim" style={{ margin: 0, fontSize: 14, lineHeight: 1.5 }}>
-                  Research, analysis, and this week&apos;s actions run automatically. You can leave this page.
+                  Research, analysis, and your next tasks run automatically. You can leave this page.
                 </p>
                 {pending?.goal ? (
                   <p className="t-mono" style={{ fontSize: 11, color: 'var(--text-mute)', marginTop: 8 }}>
@@ -476,152 +641,7 @@ export function DashboardView() {
 
       {hasPlan && !loading && !goalMet && (
         <>
-          <Card style={{ marginBottom: 24 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-              <div>
-                <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-                  <Chip variant="accent">Week {strategy!.currentWeek}</Chip>
-                  <Chip variant="default">Until goal is met</Chip>
-                  <Chip variant={weekProgress.ready === weekProgress.total ? 'success' : 'default'}>
-                    {weekProgress.ready}/{weekProgress.total} prepared
-                  </Chip>
-                  <Chip variant={weekProgress.completed === weekProgress.total ? 'success' : 'default'}>
-                    {weekProgress.completed}/{weekProgress.total} done
-                  </Chip>
-                </div>
-                {goalTarget ? (
-                  <p className="t-dim" style={{ fontSize: 13, margin: '0 0 10px', lineHeight: 1.5 }}>
-                    Target: {goalTarget.metric} → {goalTarget.target}
-                    {goalTarget.unit ? ` ${goalTarget.unit}` : ''}
-                    {goalTarget.baseline ? ` (from ${goalTarget.baseline})` : ''}
-                  </p>
-                ) : null}
-                {goalProgress ? (
-                  <div style={{ marginBottom: 12 }}>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                        fontSize: 12,
-                        marginBottom: 6,
-                      }}
-                    >
-                      <span className="t-dim">
-                        {goalProgress.status === 'met'
-                          ? 'Goal met'
-                          : goalProgress.progressPct != null
-                            ? `${goalProgress.progressPct}% toward target`
-                            : 'Measuring progress…'}
-                      </span>
-                      <Chip
-                        variant={
-                          goalProgress.status === 'met'
-                            ? 'success'
-                            : goalProgress.status === 'on_track'
-                              ? 'default'
-                              : goalProgress.status === 'behind'
-                                ? 'warn'
-                                : 'default'
-                        }
-                      >
-                        {goalProgress.status.replace('_', ' ')}
-                      </Chip>
-                    </div>
-                    {goalProgress.progressPct != null && goalProgress.status !== 'met' ? (
-                      <div
-                        style={{
-                          height: 6,
-                          borderRadius: 3,
-                          background: 'var(--border)',
-                          overflow: 'hidden',
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: `${Math.min(100, Math.max(0, goalProgress.progressPct))}%`,
-                            height: '100%',
-                            background: 'var(--accent)',
-                          }}
-                        />
-                      </div>
-                    ) : null}
-                    <p className="t-dim" style={{ fontSize: 12, margin: '8px 0 0', lineHeight: 1.45 }}>
-                      {goalProgress.summary}
-                    </p>
-                  </div>
-                ) : progressLoading ? (
-                  <p className="t-dim" style={{ fontSize: 12, margin: '0 0 10px' }}>
-                    Checking progress…
-                  </p>
-                ) : null}
-                <h2 className="h-md" style={{ marginBottom: 6 }}>
-                  {currentWeekBlock!.title}
-                </h2>
-                <p className="t-dim" style={{ fontSize: 14, margin: 0, lineHeight: 1.55, maxWidth: 560 }}>
-                  {currentWeekBlock!.focus}
-                </p>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
-                <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', letterSpacing: '0.06em' }}>
-                  AUTOPILOT MODE
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button
-                    type="button"
-                    className={`btn${autopilotMode === 'assist' ? ' btn-primary' : ''}`}
-                    disabled={modeSaving}
-                    onClick={() => void onModeChange('assist')}
-                    style={{ flex: 1, fontSize: 12 }}
-                  >
-                    Assist
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn${autopilotMode === 'hands_off' ? ' btn-primary' : ''}`}
-                    disabled={modeSaving}
-                    onClick={() => void onModeChange('hands_off')}
-                    style={{ flex: 1, fontSize: 12 }}
-                  >
-                    Hands-off
-                  </button>
-                </div>
-                <p className="t-dim" style={{ fontSize: 11, margin: 0, lineHeight: 1.45 }}>
-                  {autopilotMode === 'hands_off'
-                    ? 'AI runs each week toward your goal and applies safe store changes when connected.'
-                    : 'AI prepares this week\'s work — you paste or approve, then move on.'}
-                </p>
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
-              <Button
-                variant="primary"
-                type="button"
-                disabled={showWorking}
-                onClick={() => void onRunAutopilot()}
-              >
-                {batchRunning
-                  ? 'Running autopilot…'
-                  : preflight
-                    ? 'Re-check live data'
-                    : 'Check data & run autopilot'}
-              </Button>
-              {weekProgress.completed === weekProgress.total && weekProgress.total > 0 ? (
-                <Button variant="ghost" type="button" disabled={showWorking} onClick={() => void onAdvanceWeek()}>
-                  {advancing ? 'Planning next week…' : 'Next week →'}
-                </Button>
-              ) : null}
-              <Link href={`/plan?id=${strategy!.id}`} className="btn btn-ghost">
-                History
-              </Link>
-            </div>
-            {notice ? (
-              <p className="t-dim" style={{ fontSize: 13, margin: '12px 0 0' }}>
-                {notice}
-              </p>
-            ) : null}
-          </Card>
+          <ProgressChartsPanel charts={progressCharts} loading={progressLoading} />
 
           {preflight ? (
             <AutopilotPreflightPanel
@@ -633,53 +653,42 @@ export function DashboardView() {
             />
           ) : null}
 
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'minmax(0, 1fr) minmax(280px, 360px)',
-              gap: 16,
-              marginBottom: 24,
-              alignItems: 'start',
-            }}
-          >
-            <AutopilotActionTable
-              actions={currentWeekBlock!.actions}
-              channelLabel={channelLabel}
-              executionsByAction={executionsByAction}
-              activities={activities}
-              batchRunning={batchRunning}
-              activeActionId={activeActionId}
-              completedActionIds={completedActionIds}
-              completionSaving={completionSaving}
-              restartingActionId={restartingActionId}
-              approvingActionId={approvingActionId}
-              onToggleComplete={(actionId) => void onToggleActionComplete(actionId)}
-              onPrepareWeek={() => void runAutopilotBatch(true)}
-              onRestartAction={(actionId) => void onRestartAction(actionId)}
-              onApproveAction={(actionId, executionId) => void onApproveAction(actionId, executionId)}
-            />
-            <AutopilotActivityPanel
-              activities={activities}
-              running={batchRunning}
-              snapshots={preflight?.snapshots}
-            />
-          </div>
+          <AutopilotActionTable
+            actions={currentWeekBlock!.actions}
+            channelLabel={channelLabel}
+            executionsByAction={executionsByAction}
+            orchestratorByAction={orchestratorByAction}
+            activities={activities}
+            batchRunning={batchRunning}
+            activeActionId={activeActionId}
+            completedActionIds={completedActionIds}
+            completionSaving={completionSaving}
+            approvingActionId={approvingActionId}
+            confirmingOrchestratorId={confirmingOrchestratorId}
+            agentStatus={agentStatus}
+            strategy={strategy}
+            orchestratorState={orchestratorState}
+            cycleFocus={currentWeekBlock!.focus}
+            strategyId={strategy!.id}
+            autopilotMode={autopilotMode}
+            modeSaving={modeSaving}
+            onModeChange={(mode) => void onModeChange(mode)}
+            onToggleComplete={(actionId) => void onToggleActionComplete(actionId)}
+            onApproveAction={(actionId, executionId) => void onApproveAction(actionId, executionId)}
+            onConfirmOrchestratorAction={(actionId) => void onConfirmOrchestratorAction(actionId)}
+          />
 
-          {weekOutcomes.length > 0 ? (
-            <Card style={{ marginBottom: 24 }}>
-              <div className="h-eyebrow" style={{ marginBottom: 8 }}>
-                Progress log
-              </div>
-              <ul style={{ margin: 0, padding: 0, listStyle: 'none', fontSize: 13, lineHeight: 1.5 }}>
-                {weekOutcomes.map((o) => (
-                  <li key={o.id} style={{ padding: '8px 0', borderTop: '1px solid var(--border)' }}>
-                    <strong>Week {o.weekNumber}</strong> · {o.actionsPrepared}/{o.actionsTotal} ready
-                    {o.summary ? ` — ${o.summary}` : ''}
-                  </li>
-                ))}
-              </ul>
-            </Card>
+          {notice ? (
+            <p className="t-dim" style={{ fontSize: 13, margin: '0 0 16px' }}>
+              {notice}
+            </p>
           ) : null}
+
+          <AgentLogsPanel
+            activities={activities}
+            running={batchRunning || agentActivelyExecuting || isGenerating}
+            showFilters
+          />
         </>
       )}
 
@@ -706,9 +715,9 @@ export function DashboardView() {
             How it works
           </h2>
           <ol style={{ margin: '0 0 20px', paddingLeft: 20, lineHeight: 1.7, fontSize: 14, color: 'var(--text-dim)' }}>
-            <li>Hundres defines a measurable target and runs work week by week</li>
-            <li>Each week is prepared automatically — hands-off applies changes when connected</li>
-            <li>New weeks are planned from your data until the goal is met</li>
+            <li>Hundres defines a measurable target and keeps working until it&apos;s met</li>
+            <li>Tasks run continuously — hands-off applies changes when connected</li>
+            <li>New actions are planned from your data as you go</li>
           </ol>
           <Link href="/new" className="btn btn-primary">
             Set your goal

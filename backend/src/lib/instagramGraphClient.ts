@@ -163,6 +163,19 @@ async function publishContainer(ctx: InstagramContext, creationId: string) {
   });
 }
 
+export async function igGetMedia(
+  ctx: InstagramContext,
+  mediaId: string
+): Promise<{ id: string; permalink?: string; media_url?: string; caption?: string }> {
+  return igGraph(
+    ctx,
+    withToken(
+      `/${mediaId}?fields=id,permalink,media_url,caption`,
+      ctx.accessToken
+    )
+  );
+}
+
 export async function igPublishPhoto(
   ctx: InstagramContext,
   input: { imageUrl: string; caption?: string }

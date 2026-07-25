@@ -1,9 +1,12 @@
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import {
   classifyActionIntent,
   explainActionRoute,
+  isSingleShopifyBlogPost,
   resolveActionRoute,
   type OrgIntegrationFlags,
 } from '../executors/actionRouter.js';
+import { isInstagramAutoPublishEnabled, isShopifyAutoPublishLiveEnabled } from '../lib/contentPublishFeatureFlags.js';
 import { MCPConnectionService } from './mcpConnectionService.js';
 import { GoogleAnalyticsSnapshotService } from './googleAnalyticsSnapshotService.js';
 import { GoogleAdsSnapshotService } from './googleAdsSnapshotService.js';
@@ -99,7 +102,7 @@ export class AutopilotPreflightService {
       ),
       this.loadLine(
         'google_ads',
-        Boolean(adsConn?.config?.customerId),
+        isGoogleAdsEnabled() && Boolean(adsConn?.config?.customerId),
         () => this.ads.fetchSnapshot(organizationId)
       ),
       this.loadLine(
@@ -130,17 +133,29 @@ export class AutopilotPreflightService {
       const route = resolveActionRoute(action, integrations);
       const intent = classifyActionIntent(action);
       const intentLabel =
-        intent === 'shopify_page'
-          ? 'Shopify page'
-          : intent === 'shopify_blog'
-            ? 'Shopify blog content'
-            : intent === 'product_seo'
-              ? 'Product SEO'
-            : intent === 'google_ads_campaign'
-              ? 'Google Ads campaign'
-              : intent === 'meta_ads_campaign'
-                ? 'Meta Ads campaign'
-                : 'Assist deliverable';
+        route.executionType === 'create_meta_ads_campaign'
+          ? 'Meta Ads campaign'
+          : route.executionType === 'create_google_ads_campaign'
+            ? 'Google Ads campaign'
+            : route.executionType === 'publish_instagram_photo'
+              ? /\bcarousel\b|\b\d[\d-]?\s*slides?\b|\b\d+-slide\b/.test(
+                  `${action.title} ${action.outcome ?? ''}`.toLowerCase()
+                )
+                ? 'Instagram carousel'
+                : 'Instagram auto-publish'
+              : route.executionType === 'publish_instagram_story'
+                ? 'Instagram story'
+                : route.executionType === 'publish_instagram_reel'
+                  ? 'Instagram Reel'
+                : route.executionType === 'create_shopify_blog_article'
+                ? 'Shopify blog article'
+                : route.executionType === 'create_shopify_page'
+                  ? 'Shopify page'
+                  : intent === 'shopify_blog'
+                    ? 'Shopify blog content'
+                    : intent === 'product_seo'
+                      ? 'Product SEO'
+                      : 'Assist deliverable';
 
       actionReasoning.push({
         actionId: action.id,
@@ -150,6 +165,10 @@ export class AutopilotPreflightService {
       });
 
       if (intent === 'shopify_blog') {
+        if (isSingleShopifyBlogPost(action) && integrations.shopifyContentWrite) {
+          automatedCount += 1;
+          continue;
+        }
         assistCount += 1;
         if (!integrations.shopify) {
           blockedActions.push({
@@ -165,6 +184,35 @@ export class AutopilotPreflightService {
             reason:
               'Shopify MCP write_content scope not granted — blog posts will be drafted only until you add write_content in Partners and reconnect.',
             resolution: 'reconnect',
+          });
+        }
+        continue;
+      }
+
+      if (intent === 'instagram_publish' && isInstagramAutoPublishEnabled()) {
+        automatedCount += 1;
+        if (!integrations.instagramReady) {
+          blockedActions.push({
+            actionId: action.id,
+            title: action.title,
+            reason: 'Instagram Business is not connected — feed posts cannot auto-publish.',
+            resolution: 'connect',
+          });
+        }
+        continue;
+      }
+
+      if (intent === 'mailchimp_campaign') {
+        if (integrations.mailchimpReady) {
+          automatedCount += 1;
+        } else {
+          assistCount += 1;
+          blockedActions.push({
+            actionId: action.id,
+            title: action.title,
+            reason:
+              'Mailchimp is not connected — email will be copy-only until you connect and pick an audience.',
+            resolution: 'connect',
           });
         }
         continue;
@@ -221,7 +269,7 @@ export class AutopilotPreflightService {
         continue;
       }
 
-      if (intent === 'google_ads_campaign') {
+      if (route.executionType === 'create_google_ads_campaign') {
         if (!integrations.googleAdsReady) {
           blockedActions.push({
             actionId: action.id,
@@ -235,7 +283,7 @@ export class AutopilotPreflightService {
         continue;
       }
 
-      if (intent === 'meta_ads_campaign') {
+      if (route.executionType === 'create_meta_ads_campaign') {
         if (!integrations.metaAdsReady) {
           blockedActions.push({
             actionId: action.id,
@@ -251,15 +299,20 @@ export class AutopilotPreflightService {
 
     const blockedCount = blockedActions.length;
     const loadedLabels = snapshots.filter((s) => s.loaded).map((s) => s.label);
+    const autoPublishNote =
+      isInstagramAutoPublishEnabled() || isShopifyAutoPublishLiveEnabled()
+        ? 'Some actions auto-publish to Instagram and/or Shopify when connected.'
+        : null;
     const weekReasoning = [
       loadedLabels.length > 0
         ? `Live data from ${loadedLabels.join(', ')} will inform Claude when drafting this week's deliverables.`
         : 'No live snapshots loaded — Claude will rely on your goal, business profile, and plan context only.',
+      autoPublishNote,
       assistCount > 0
-        ? `${assistCount} action(s): generate copy/checklists for you to paste (nothing auto-published).`
+        ? `${assistCount} action(s): agent-prepared deliverables (research, email copy, or waiting on a connection).`
         : null,
       automatedCount > 0
-        ? `${automatedCount} action(s): load Shopify catalog/pages where scoped, draft changes, ${blockedCount ? 'with manual steps where write access is missing' : 'then preview for approval'}.`
+        ? `${automatedCount} action(s): auto-publish or apply in connected platforms${blockedCount ? ' (some need reconnection)' : ''}.`
         : null,
     ]
       .filter(Boolean)

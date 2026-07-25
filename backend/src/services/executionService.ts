@@ -1,4 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { query } from '../database/connection.js';
+import type { AgentExecutionBrief } from '../types/agentTask.js';
+import { inferAgentBriefFallback } from '../types/agentTask.js';
 import type { PlanAction, PlanDocument } from '../types/plan.js';
 import type {
   BatchExecutionResult,
@@ -9,8 +12,11 @@ import type {
   ExecutionRecord,
   ExecutionStatus,
   GoogleAdsCampaignState,
+  InstagramPublishState,
+  MailchimpSequenceState,
   MetaAdsCampaignState,
   ProductSeoState,
+  ShopifyBlogArticleState,
   ShopifyPageState,
 } from '../types/execution.js';
 import { AssistExecutor } from '../executors/assistExecutor.js';
@@ -19,24 +25,46 @@ import {
   explainActionRoute,
   isAdvertPlanAssist,
   isAutomatedWrite,
+  isInstagramStoryAction,
+  isSingleShopifyBlogPost,
   resolveActionRoute,
+  resolveAdHocActionRoute,
   type OrgIntegrationFlags,
 } from '../executors/actionRouter.js';
 import { shopifyHasWriteContentScope, shopifyHasWriteProductsScope } from '../lib/shopifyAdmin.js';
 import { AuditLogService } from './auditLogService.js';
 import { AutopilotActivityService } from './autopilotActivityService.js';
 import { AutopilotPreflightService } from './autopilotPreflightService.js';
+import { ActionCompletionService } from './actionCompletionService.js';
 import { ClaudeService } from './claudeService.js';
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
+import { isRunwayConfigured } from '../lib/runwayClient.js';
 import { MCPConnectionService } from './mcpConnectionService.js';
 import { ShopifyExecutionService } from './shopifyExecutionService.js';
 import { GoogleAdsCampaignService } from './googleAdsCampaignService.js';
 import { MetaAdsCampaignService } from './metaAdsCampaignService.js';
+import { MailchimpExecutionService } from './mailchimpExecutionService.js';
 import { GoogleAdsSnapshotService } from './googleAdsSnapshotService.js';
 import { MetaAdsSnapshotService } from './metaAdsSnapshotService.js';
 import { StrategyService } from './strategyService.js';
-import { getBusinessProfile, type BusinessProfile } from './businessProfileService.js';
+import { getBusinessProfile, formatBusinessProfileForPrompt, type BusinessProfile } from './businessProfileService.js';
 import { isInstagramImagePreviewEnabled } from '../lib/instagramFeatureFlags.js';
-import { pickBrandImageForInstagramAssist } from './instagramAssistImageService.js';
+import { isShopifyAutoPublishLiveEnabled } from '../lib/contentPublishFeatureFlags.js';
+import {
+  evaluateMetaAdsCreateThrottle,
+  formatMetaAdsPerformanceForCreativePrompt,
+} from '../lib/paidAdThrottle.js';
+import { evaluateChannelCaps, getSeoCooldownTargets } from '../lib/seoCooldown.js';
+import { getAutopilotPace } from './autopilotService.js';
+import { getPaceProfile } from '../lib/autopilotPaceConfig.js';
+import { pickInstagramImagesForAssist } from './instagramAssistImageService.js';
+import { InstagramExecutionService } from './instagramExecutionService.js';
+import { LearningKnowledgeService } from './learningKnowledgeService.js';
+import { ContentRecipeKnowledgeService } from './contentRecipeKnowledgeService.js';
+import { BrandVisualLibraryService } from './brandVisualLibraryService.js';
+import { AdCampaignLibraryService } from './adCampaignLibraryService.js';
+import { isUnsplashConfigured } from '../lib/unsplashClient.js';
+import { shopStorefrontUrl } from '../lib/shopStorefrontUrl.js';
 
 type ExecutionRow = {
   id: string;
@@ -97,6 +125,20 @@ function asProductSeo(payload: ExecutionPayload): ProductSeoState {
   return payload;
 }
 
+function asShopifyBlogArticle(payload: ExecutionPayload): ShopifyBlogArticleState {
+  if (payload.kind !== 'shopify_blog_article') {
+    throw new Error('Expected Shopify blog article payload');
+  }
+  return payload;
+}
+
+function asInstagramPublish(payload: ExecutionPayload): InstagramPublishState {
+  if (payload.kind !== 'instagram_publish') {
+    throw new Error('Expected Instagram publish payload');
+  }
+  return payload;
+}
+
 function asShopifyPage(payload: ExecutionPayload): ShopifyPageState {
   if (payload.kind !== 'shopify_page') {
     throw new Error('Expected Shopify page payload');
@@ -118,6 +160,13 @@ function asMetaAdsCampaign(payload: ExecutionPayload): MetaAdsCampaignState {
   return payload;
 }
 
+function asMailchimpSequence(payload: ExecutionPayload): MailchimpSequenceState {
+  if (payload.kind !== 'mailchimp_sequence') {
+    throw new Error('Expected Mailchimp sequence payload');
+  }
+  return payload;
+}
+
 function extractPayloadReasoning(payload: ExecutionPayload): string | null {
   if (payload.kind === 'assist_deliverable' && payload.reasoning) {
     return payload.reasoning;
@@ -134,6 +183,15 @@ function extractPayloadReasoning(payload: ExecutionPayload): string | null {
   if (payload.kind === 'meta_ads_campaign' && payload.reasoning) {
     return payload.reasoning;
   }
+  if (payload.kind === 'mailchimp_sequence' && payload.reasoning) {
+    return payload.reasoning;
+  }
+  if (payload.kind === 'instagram_publish' && payload.reasoning) {
+    return payload.reasoning;
+  }
+  if (payload.kind === 'shopify_blog_article' && payload.reasoning) {
+    return payload.reasoning;
+  }
   return null;
 }
 
@@ -141,8 +199,10 @@ export class ExecutionService {
   private strategy = new StrategyService();
   private mcp = new MCPConnectionService();
   private shopify = new ShopifyExecutionService();
+  private instagram = new InstagramExecutionService();
   private googleAdsCampaign = new GoogleAdsCampaignService();
   private metaAdsCampaign = new MetaAdsCampaignService();
+  private mailchimpExecution = new MailchimpExecutionService();
   private googleAdsSnapshot = new GoogleAdsSnapshotService();
   private metaAdsSnapshot = new MetaAdsSnapshotService();
   private assist = new AssistExecutor();
@@ -150,13 +210,60 @@ export class ExecutionService {
   private audit = new AuditLogService();
   private activity = new AutopilotActivityService();
   private preflight = new AutopilotPreflightService();
+  private completions = new ActionCompletionService();
+  private learning = new LearningKnowledgeService();
+  private recipes = new ContentRecipeKnowledgeService();
+  private visuals = new BrandVisualLibraryService();
+  private adCampaignLibrary = new AdCampaignLibraryService();
+
+  private buildMcpCapabilityNotes(integrations: OrgIntegrationFlags): string {
+    const lines: string[] = [];
+    if (integrations.runwayReady) {
+      lines.push(
+        '- Runway MCP ready: generate_instagram_reel / text_to_video → public HTTPS MP4 (9:16). Use for AI video Stories or Reels.'
+      );
+    }
+    if (integrations.instagramReady) {
+      lines.push(
+        '- Instagram MCP ready: publish_photo, publish_story (image or video URL), publish_reel, publish_carousel.'
+      );
+    }
+    if (integrations.canvaReady) {
+      lines.push(
+        '- Canva MCP ready: create_instagram_design + export_design → PNG for feed/story stills.'
+      );
+    }
+    if (isUnsplashConfigured()) {
+      lines.push('- Unsplash MCP ready: search_photos for lifestyle stills.');
+    }
+    if (integrations.shopify) {
+      lines.push('- Shopify MCP ready: create_blog_article, create_page, product SEO (when write scopes allow).');
+    }
+    if (integrations.mailchimpReady) {
+      lines.push(
+        '- Mailchimp MCP ready: list_audiences, ensure_audience, upsert_member, create_draft_campaign (drafts only — never auto-send).'
+      );
+    }
+    if (!lines.length) {
+      return 'No content MCPs ready yet — ask the user to connect Integrations.';
+    }
+    return lines.join('\n');
+  }
+
+  private async markPlanActionComplete(
+    organizationId: string,
+    strategyId: string,
+    actionId: string
+  ): Promise<void> {
+    await this.completions.setCompleted(organizationId, strategyId, actionId, true);
+  }
 
   /** Pull live integration data, log to activity feed, optionally execute the week. */
   async runWeekBatch(
     organizationId: string,
     strategyId: string,
     week: number,
-    options: { confirm: boolean; autoApply: boolean }
+    options: { confirm: boolean }
   ): Promise<BatchRunResponse> {
     const strategy = await this.strategy.getById(organizationId, strategyId);
     if (!strategy?.plan) {
@@ -205,10 +312,6 @@ export class ExecutionService {
       weekBlock.actions,
       integrations
     );
-
-    if (options.autoApply) {
-      await this.autoApplyResults(organizationId, strategyId, week, results, integrations);
-    }
 
     return { phase: 'executed', preflight: preflightResult, results };
   }
@@ -300,7 +403,6 @@ export class ExecutionService {
   ): Promise<BatchExecutionResult[]> {
     const response = await this.runWeekBatch(organizationId, strategyId, week, {
       confirm: true,
-      autoApply: false,
     });
     return response.results;
   }
@@ -313,11 +415,6 @@ export class ExecutionService {
     integrations: OrgIntegrationFlags
   ): Promise<BatchExecutionResult[]> {
     const existing = await this.listForStrategy(organizationId, strategyId);
-    const doneIds = new Set(
-      existing
-        .filter((e) => e.status === 'executed' || e.status === 'previewed')
-        .map((e) => e.actionId)
-    );
 
     const results: BatchExecutionResult[] = [];
 
@@ -337,8 +434,16 @@ export class ExecutionService {
       const decisionLabel =
         route.executionType === 'create_meta_ads_campaign'
           ? 'Meta Ads campaign draft'
+          : route.executionType === 'create_mailchimp_drafts'
+            ? 'Mailchimp email drafts'
           : route.executionType === 'create_google_ads_campaign'
           ? 'Google Ads campaign draft'
+          : route.executionType === 'publish_instagram_photo'
+            ? 'Instagram feed publish'
+          : route.executionType === 'publish_instagram_story'
+            ? 'Instagram story publish'
+          : route.executionType === 'publish_instagram_reel'
+            ? 'Instagram Reel publish'
           : route.executionType === 'create_shopify_page'
           ? integrations.shopifyContentWrite
             ? 'Shopify page write'
@@ -353,11 +458,55 @@ export class ExecutionService {
               : 'Shopify SEO draft only'
             : 'Assist deliverable';
 
-      if (doneIds.has(action.id)) {
+      // Only skip when the same action already has a preview/execute for THIS route type.
+      // Wrong prior type (e.g. Meta Ads for an Instagram feed post) must re-run.
+      const priorSameType = existing.find(
+        (e) =>
+          e.actionId === action.id &&
+          e.executionType === route.executionType &&
+          (e.status === 'executed' || e.status === 'previewed')
+      );
+      const priorAny = existing.find((e) => e.actionId === action.id);
+
+      if (priorSameType) {
+        if (this.canAutoApplyExecution(priorSameType, integrations)) {
+          let execution = priorSameType;
+          execution = await this.tryAutoApplyExecution(
+            organizationId,
+            strategyId,
+            execution,
+            integrations,
+            week,
+            action.id
+          );
+          results.push({
+            actionId: action.id,
+            ok: execution.status === 'executed',
+            execution,
+            ...(execution.errorMessage ? { error: execution.errorMessage } : {}),
+          });
+          if (execution.status === 'executed') {
+            await this.activity.log({
+              organizationId,
+              strategyId,
+              weekNumber: week,
+              actionId: action.id,
+              step: 'complete',
+              title:
+                execution.status === 'executed'
+                  ? this.publishedDoneTitle(execution, action)
+                  : `Created: ${action.title}`,
+              detail: execution.summary,
+              status: 'success',
+            });
+          }
+          continue;
+        }
+
         results.push({
           actionId: action.id,
           ok: true,
-          execution: existing.find((e) => e.actionId === action.id),
+          execution: priorSameType,
         });
         await this.activity.log({
           organizationId,
@@ -372,16 +521,29 @@ export class ExecutionService {
         continue;
       }
 
-      await this.activity.log({
-        organizationId,
-        strategyId,
-        weekNumber: week,
-        actionId: action.id,
-        step: 'decision',
-        title: `Decision: ${decisionLabel}`,
-        detail: reasoning,
-        status: 'info',
-      });
+      if (priorAny && priorAny.executionType !== route.executionType) {
+        await this.activity.log({
+          organizationId,
+          strategyId,
+          weekNumber: week,
+          actionId: action.id,
+          step: 'decision',
+          title: `Re-routing: ${decisionLabel}`,
+          detail: `Previous attempt was ${priorAny.executionType}; running again as ${route.executionType}. ${reasoning}`,
+          status: 'warn',
+        });
+      } else {
+        await this.activity.log({
+          organizationId,
+          strategyId,
+          weekNumber: week,
+          actionId: action.id,
+          step: 'decision',
+          title: `Decision: ${decisionLabel}`,
+          detail: reasoning,
+          status: 'info',
+        });
+      }
 
       await this.activity.log({
         organizationId,
@@ -394,9 +556,15 @@ export class ExecutionService {
           route.mode === 'assist'
             ? 'Generating deliverable with Claude…'
             : route.executionType === 'create_meta_ads_campaign'
-              ? 'Drafting Meta campaign with Claude…'
+              ? 'Drafting Meta campaign + generating creatives (library / Canva / Runway)…'
               : route.executionType === 'create_google_ads_campaign'
               ? 'Drafting Google Search campaign with Claude…'
+              : route.executionType === 'publish_instagram_photo'
+              ? 'Creating Instagram feed post (images + caption) and publishing…'
+              : route.executionType === 'publish_instagram_story'
+              ? 'Creating Instagram story and publishing…'
+              : route.executionType === 'publish_instagram_reel'
+              ? 'Generating Reel video and publishing…'
               : route.executionType === 'create_shopify_page'
               ? integrations.shopifyContentWrite
                 ? 'Writing store page content with Claude…'
@@ -406,9 +574,20 @@ export class ExecutionService {
       });
 
       try {
-        const preview = await this.preview(organizationId, strategyId, action.id);
-        results.push({ actionId: action.id, ok: true, execution: preview.execution });
-        const aiReasoning = extractPayloadReasoning(preview.execution.proposedState);
+        const preview = await this.executeActionPreview(organizationId, strategyId, action.id);
+        let execution = preview.execution;
+        if (this.canAutoApplyExecution(execution, integrations)) {
+          execution = await this.tryAutoApplyExecution(
+            organizationId,
+            strategyId,
+            execution,
+            integrations,
+            week,
+            action.id
+          );
+        }
+        results.push({ actionId: action.id, ok: true, execution });
+        const aiReasoning = extractPayloadReasoning(execution.proposedState);
         if (aiReasoning) {
           await this.activity.log({
             organizationId,
@@ -421,21 +600,17 @@ export class ExecutionService {
             status: 'info',
           });
         }
-        const completeDetail =
-          preview.scopeWarning ??
-          (preview.execution.proposedState.kind === 'meta_ads_campaign'
-            ? 'Meta campaign drafted — review and approve to create it paused in Meta Ads Manager. You enable spending when ready.'
-            : preview.execution.proposedState.kind === 'google_ads_campaign'
-            ? 'Campaign drafted — review and approve to create it paused in Google Ads. You enable spending in Google Ads when ready.'
-            : preview.execution.summary);
         await this.activity.log({
           organizationId,
           strategyId,
           weekNumber: week,
           actionId: action.id,
           step: 'complete',
-          title: `Ready: ${action.title}`,
-          detail: completeDetail,
+          title:
+            execution.status === 'executed'
+              ? this.publishedDoneTitle(execution, action)
+              : `Ready: ${action.title}`,
+          detail: preview.scopeWarning ?? execution.summary,
           status: 'success',
         });
       } catch (err) {
@@ -491,14 +666,234 @@ export class ExecutionService {
     const integrations = await this.getIntegrationFlags(organizationId);
     const route = resolveActionRoute(action, integrations);
     const reasoning = explainActionRoute(action, integrations);
+    const week = strategy.currentWeek;
 
+    await this.activity.log({
+      organizationId,
+      strategyId,
+      weekNumber: week,
+      actionId: action.id,
+      step: 'decision',
+      title: `Decision: ${this.actionDecisionLabel(action, route, integrations)}`,
+      detail: reasoning,
+      status: 'info',
+    });
+
+    await this.activity.log({
+      organizationId,
+      strategyId,
+      weekNumber: week,
+      actionId: action.id,
+      step: 'executing',
+      title: action.title,
+      detail: this.actionExecutingDetail(route, integrations),
+      status: 'running',
+    });
+
+    try {
+      const result = await this.executeActionPreviewForAction(
+        organizationId,
+        strategyId,
+        action,
+        strategy,
+        route,
+        integrations
+      );
+      let execution = result.execution;
+
+      if (this.canAutoApplyExecution(execution, integrations)) {
+        try {
+          execution = await this.tryAutoApplyExecution(
+            organizationId,
+            strategyId,
+            execution,
+            integrations,
+            week,
+            action.id
+          );
+        } catch {
+          // Keep previewed execution if auto-create fails.
+        }
+      }
+
+      const aiReasoning = extractPayloadReasoning(execution.proposedState);
+      if (aiReasoning) {
+        await this.activity.log({
+          organizationId,
+          strategyId,
+          weekNumber: week,
+          actionId: action.id,
+          step: 'ai_reasoning',
+          title: `Why: ${action.title}`,
+          detail: aiReasoning,
+          status: 'info',
+        });
+      }
+      await this.activity.log({
+        organizationId,
+        strategyId,
+        weekNumber: week,
+        actionId: action.id,
+        step: 'complete',
+        title:
+          execution.status === 'executed'
+            ? this.publishedDoneTitle(execution, action)
+            : `Ready: ${action.title}`,
+        detail: result.scopeWarning ?? execution.summary,
+        status: 'success',
+      });
+      return { ...result, execution, reasoning };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed';
+      await this.activity.log({
+        organizationId,
+        strategyId,
+        weekNumber: week,
+        actionId: action.id,
+        step: 'failed',
+        title: `Failed: ${action.title}`,
+        detail: message,
+        status: 'error',
+      });
+      throw err;
+    }
+  }
+
+  private actionDecisionLabel(
+    action: PlanAction,
+    route: ReturnType<typeof resolveActionRoute>,
+    integrations: OrgIntegrationFlags
+  ): string {
+    if (route.executionType === 'create_meta_ads_campaign') return 'Meta Ads campaign draft';
+    if (route.executionType === 'create_mailchimp_drafts') return 'Mailchimp email drafts';
+    if (route.executionType === 'create_google_ads_campaign') return 'Google Ads campaign draft';
+    if (route.executionType === 'publish_instagram_photo') return 'Instagram auto-publish';
+    if (route.executionType === 'publish_instagram_story') return 'Instagram story';
+    if (route.executionType === 'publish_instagram_reel') return 'Instagram Reel (Runway video)';
+    if (route.executionType === 'create_shopify_blog_article') {
+      return integrations.shopifyContentWrite
+        ? 'Shopify blog article write'
+        : 'Shopify blog draft + MCP prompt';
+    }
+    if (route.executionType === 'create_shopify_page') {
+      return integrations.shopifyContentWrite
+        ? 'Shopify page write'
+        : 'Shopify page draft + MCP prompt';
+    }
+    if (classifyActionIntent(action) === 'shopify_blog' && !isSingleShopifyBlogPost(action)) {
+      return integrations.shopifyContentWrite
+        ? 'Shopify blog draft'
+        : 'Blog calendar + MCP prompt';
+    }
+    if (route.mode === 'automated_write') {
+      return integrations.shopifyWrite ? 'Shopify SEO write' : 'Shopify SEO draft only';
+    }
+    return 'Assist deliverable';
+  }
+
+  private actionExecutingDetail(
+    route: ReturnType<typeof resolveActionRoute>,
+    integrations: OrgIntegrationFlags
+  ): string {
+    if (route.mode === 'assist') return 'Generating deliverable with Claude…';
+    if (route.executionType === 'create_meta_ads_campaign') {
+      return 'Drafting Meta campaign with Claude…';
+    }
+    if (route.executionType === 'create_mailchimp_drafts') {
+      return 'Drafting Mailchimp email sequence with Claude…';
+    }
+    if (route.executionType === 'create_google_ads_campaign') {
+      return 'Drafting Google Search campaign with Claude…';
+    }
+    if (route.executionType === 'publish_instagram_photo') {
+      return 'Exporting creative (Canva if requested) and publishing photo to Instagram…';
+    }
+    if (route.executionType === 'publish_instagram_story') {
+      return 'Publishing to Instagram Stories…';
+    }
+    if (route.executionType === 'publish_instagram_reel') {
+      return 'Generating Runway AI video (5s) and publishing Instagram Reel…';
+    }
+    if (route.executionType === 'create_shopify_blog_article') {
+      return integrations.shopifyContentWrite
+        ? 'Writing blog article with Claude…'
+        : 'Drafting blog article + Claude.ai Shopify MCP prompt…';
+    }
+    if (route.executionType === 'create_shopify_page') {
+      return integrations.shopifyContentWrite
+        ? 'Writing store page content with Claude…'
+        : 'Drafting page + Claude.ai Shopify MCP prompt…';
+    }
+    return 'Loading Shopify product and drafting SEO changes…';
+  }
+
+  private agentTaskCompleteDetail(
+    result: ExecutionPreviewResponse,
+    execution: ExecutionRecord
+  ): string {
+    const base = result.scopeWarning ?? execution.summary;
+    const state = execution.proposedState;
+    if (state.kind !== 'instagram_publish') return base;
+
+    const parts = [base];
+    if (state.imageSource === 'canva') {
+      parts.push(
+        state.canvaDesignId
+          ? `Canva design ${state.canvaDesignId} exported`
+          : 'Creative exported from Canva'
+      );
+      if (state.canvaEditUrl) parts.push(`Edit in Canva: ${state.canvaEditUrl}`);
+    } else if (state.mediaType === 'reel' || state.imageSource === 'runway') {
+      parts.push(
+        state.runwayTaskId
+          ? `Runway AI video ${state.runwayTaskId}`
+          : 'Runway AI video Reel'
+      );
+    } else if (state.imageSource) {
+      parts.push(`Image source: ${state.imageSource}`);
+    }
+    if (state.imageRationale) parts.push(state.imageRationale.slice(0, 220));
+    if (state.permalink) parts.push(state.permalink);
+    return parts.filter(Boolean).join(' · ');
+  }
+
+  private async executeActionPreviewForAction(
+    organizationId: string,
+    strategyId: string,
+    action: PlanAction,
+    strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
+    route: ReturnType<typeof resolveActionRoute>,
+    integrations: OrgIntegrationFlags,
+    agentBrief?: AgentExecutionBrief | null
+  ): Promise<ExecutionPreviewResponse> {
     if (route.mode === 'assist') {
-      const result = await this.runAssist(organizationId, strategyId, action, strategy, route);
-      return { ...result, reasoning };
+      return this.runAssist(
+        organizationId,
+        strategyId,
+        action,
+        strategy,
+        route,
+        agentBrief
+      );
     }
 
-    if (route.executionType === 'create_shopify_page') {
-      const result = await this.runShopifyPagePreview(
+    if (
+      route.executionType === 'publish_instagram_photo' ||
+      route.executionType === 'publish_instagram_story' ||
+      route.executionType === 'publish_instagram_reel'
+    ) {
+      return this.runInstagramPublish(
+        organizationId,
+        strategyId,
+        action,
+        strategy,
+        route,
+        agentBrief
+      );
+    }
+
+    if (route.executionType === 'create_shopify_blog_article') {
+      return this.runShopifyBlogPreview(
         organizationId,
         strategyId,
         action,
@@ -506,125 +901,552 @@ export class ExecutionService {
         route,
         integrations.shopifyContentWrite
       );
-      return { ...result, reasoning };
+    }
+
+    if (route.executionType === 'create_shopify_page') {
+      return this.runShopifyPagePreview(
+        organizationId,
+        strategyId,
+        action,
+        strategy,
+        route,
+        integrations.shopifyContentWrite
+      );
     }
 
     if (route.executionType === 'create_google_ads_campaign') {
-      const result = await this.runGoogleAdsCampaignPreview(
+      return this.runGoogleAdsCampaignPreview(
         organizationId,
         strategyId,
         action,
         strategy,
         route
       );
-      return { ...result, reasoning };
     }
 
     if (route.executionType === 'create_meta_ads_campaign') {
-      const result = await this.runMetaAdsCampaignPreview(
+      return this.runMetaAdsCampaignPreview(
         organizationId,
         strategyId,
         action,
         strategy,
         route
       );
-      return { ...result, reasoning };
     }
 
-    const result = await this.runShopifyProductSeoPreview(
+    if (route.executionType === 'create_mailchimp_drafts') {
+      return this.runMailchimpSequencePreview(
+        organizationId,
+        strategyId,
+        action,
+        strategy,
+        route
+      );
+    }
+
+    return this.runShopifyProductSeoPreview(
       organizationId,
       strategyId,
       action,
       route,
       integrations.shopifyWrite
     );
-    return { ...result, reasoning };
   }
 
-  /** Prepare a week; in hands-off mode auto-apply low-risk Shopify writes when scoped. */
-  async runWeekAutopilot(
+  private async executeActionPreview(
     organizationId: string,
     strategyId: string,
-    week: number,
-    autoApply: boolean,
-    confirm = true
-  ): Promise<BatchRunResponse> {
-    return this.runWeekBatch(organizationId, strategyId, week, { confirm, autoApply });
+    actionId: string
+  ): Promise<ExecutionPreviewResponse> {
+    const { strategy, action } = await this.loadAction(organizationId, strategyId, actionId);
+    const integrations = await this.getIntegrationFlags(organizationId);
+    const route = resolveActionRoute(action, integrations);
+    return this.executeActionPreviewForAction(
+      organizationId,
+      strategyId,
+      action,
+      strategy,
+      route,
+      integrations
+    );
   }
 
-  private async autoApplyResults(
+  /** Conversational agent chat — may clarify, then run one supported action. */
+  async runAgentTask(
     organizationId: string,
     strategyId: string,
-    week: number,
-    results: BatchExecutionResult[],
-    integrations: OrgIntegrationFlags
-  ): Promise<void> {
-    if (!integrations.shopifyWrite && !integrations.shopifyContentWrite) {
-      return;
+    message: string,
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  ): Promise<{
+    reply: string;
+    supported: boolean;
+    unsupportedReason?: string;
+    needsClarification?: boolean;
+    sentiment?: string;
+    action?: PlanAction;
+    routing?: string;
+    result?: ExecutionPreviewResponse;
+    needsHumanGate?: boolean;
+  }> {
+    const strategy = await this.strategy.getById(organizationId, strategyId);
+    if (!strategy) {
+      throw new Error('Plan not found');
     }
 
-    for (const result of results) {
-      const execution = result.execution;
-      if (!result.ok || !execution || execution.status !== 'previewed') {
-        continue;
+    const integrations = await this.getIntegrationFlags(organizationId);
+    const connectedPlatforms: string[] = [];
+    if (integrations.shopify) connectedPlatforms.push('Shopify');
+    if (integrations.canvaReady) connectedPlatforms.push('Canva');
+    if (integrations.runwayReady) connectedPlatforms.push('Runway');
+    if (integrations.instagramReady) connectedPlatforms.push('Instagram');
+    if (integrations.mailchimpReady) connectedPlatforms.push('Mailchimp');
+    if (integrations.metaAdsReady) connectedPlatforms.push('Meta Ads');
+    if (integrations.googleAdsReady) connectedPlatforms.push('Google Ads');
+
+    const profile = await getBusinessProfile(organizationId);
+    const brandProfile =
+      formatBusinessProfileForPrompt(profile) ||
+      [profile.website, profile.oneLiner, profile.audience, profile.offer]
+        .filter(Boolean)
+        .join(' · ') ||
+      strategy.context ||
+      'Brand profile not filled in yet — use Keylo / workspace context if known.';
+
+    const learningCtx = await this.learning
+      .getPatternsForPlanning(organizationId, strategy.goal)
+      .catch(() => ({
+        promptSection: '',
+        patterns: [],
+        applied: [],
+      }));
+
+    const recipesForPrompt = await this.recipes
+      .formatForPrompt(organizationId, 16)
+      .catch(() => '');
+
+    const visualsForPrompt = await this.visuals
+      .formatForPrompt(organizationId, 12)
+      .catch(() => '');
+
+    const knowledgeExtras = [
+      recipesForPrompt
+        ? `SAVED CONTENT RECIPES:\n${recipesForPrompt}`
+        : '',
+      visualsForPrompt
+        ? `BRAND VISUAL LIBRARY (prefer these image URLs + themes for Instagram stills):\n${visualsForPrompt}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    let parsed = await this.claude.parseAgentTask({
+      message,
+      goal: strategy.goal,
+      brandProfile,
+      businessContext: brandProfile,
+      connectedPlatforms,
+      mcpCapabilities: this.buildMcpCapabilityNotes(integrations),
+      learningKnowledge: learningCtx.promptSection || undefined,
+      contentRecipes: knowledgeExtras || undefined,
+      history,
+    });
+
+    if (!parsed.action && this.isAdHocInstagramContentRequest(message, history)) {
+      parsed = {
+        ...parsed,
+        supported: true,
+        needsClarification: false,
+        action: this.buildAdHocInstagramAction(message, strategy.goal),
+        executionBrief: parsed.executionBrief ?? inferAgentBriefFallback(message, history),
+      };
+    }
+
+    if (parsed.needsClarification && !parsed.action) {
+      return {
+        reply: parsed.reply,
+        supported: false,
+        needsClarification: true,
+        sentiment: parsed.sentiment,
+        unsupportedReason:
+          parsed.unsupportedReason ??
+          'Tell me one more detail (product name or vibe) and I will publish.',
+      };
+    }
+
+    if (!parsed.action) {
+      return {
+        reply: parsed.reply,
+        supported: false,
+        sentiment: parsed.sentiment,
+        unsupportedReason:
+          parsed.unsupportedReason ?? 'This request could not be mapped to a supported action.',
+      };
+    }
+
+    const action = parsed.action;
+    let agentBrief = this.mergeAgentExecutionBrief(parsed.executionBrief, message, history);
+    const matchedRecipe = await this.recipes
+      .matchFromBrief(
+        organizationId,
+        `${agentBrief.recipeSlug ?? ''} ${agentBrief.fullRequest} ${message}`
+      )
+      .catch(() => null);
+    if (matchedRecipe) {
+      agentBrief = {
+        ...agentBrief,
+        recipeSlug: matchedRecipe.slug,
+        mediaFormat:
+          matchedRecipe.medium === 'image'
+            ? agentBrief.mediaFormat === 'carousel'
+              ? 'carousel'
+              : 'feed'
+            : agentBrief.mediaFormat === 'story'
+              ? 'story'
+              : 'reel',
+        videoSource: matchedRecipe.medium === 'video' ? 'runway' : undefined,
+      };
+    }
+    const week = strategy.currentWeek;
+    const route = resolveAdHocActionRoute(action, integrations, agentBrief);
+    const routing = explainActionRoute(action, integrations);
+
+    await this.activity.log({
+      organizationId,
+      strategyId,
+      weekNumber: week,
+      actionId: action.id,
+      step: 'agent_task',
+      title: `Ask: ${message.slice(0, 80)}${message.length > 80 ? '…' : ''}`,
+      detail: parsed.reply,
+      status: 'info',
+    });
+
+    await this.activity.log({
+      organizationId,
+      strategyId,
+      weekNumber: week,
+      actionId: action.id,
+      step: 'decision',
+      title: `Decision: ${this.actionDecisionLabel(action, route, integrations)}`,
+      detail: routing,
+      status: 'info',
+    });
+
+    await this.activity.log({
+      organizationId,
+      strategyId,
+      weekNumber: week,
+      actionId: action.id,
+      step: 'executing',
+      title: action.title,
+      detail: this.actionExecutingDetail(route, integrations),
+      status: 'running',
+    });
+
+    try {
+      let result = await this.executeActionPreviewForAction(
+        organizationId,
+        strategyId,
+        action,
+        strategy,
+        route,
+        integrations,
+        agentBrief
+      );
+      let execution = result.execution;
+
+      if (this.canAutoApplyExecution(execution, integrations)) {
+        try {
+          execution = await this.tryAutoApplyExecution(
+            organizationId,
+            strategyId,
+            execution,
+            integrations,
+            week,
+            action.id
+          );
+          result = { ...result, execution };
+        } catch {
+          // Keep preview if auto-apply fails.
+        }
       }
 
-      const canAutoApply =
-        execution.executionType === 'update_product_seo'
-          ? integrations.shopifyWrite
-          : execution.executionType === 'create_shopify_page'
-            ? integrations.shopifyContentWrite
-            : false;
+      const isPaidAd =
+        execution.executionType === 'create_meta_ads_campaign' ||
+        execution.executionType === 'create_google_ads_campaign';
+      const needsHumanGate = isPaidAd && execution.status === 'executed';
 
-      if (!canAutoApply) {
-        continue;
+      const aiReasoning = extractPayloadReasoning(execution.proposedState);
+      if (aiReasoning) {
+        await this.activity.log({
+          organizationId,
+          strategyId,
+          weekNumber: week,
+          actionId: action.id,
+          step: 'ai_reasoning',
+          title: `Why: ${action.title}`,
+          detail: aiReasoning,
+          status: 'info',
+        });
       }
+
+      const completeDetail = this.agentTaskCompleteDetail(result, execution);
 
       await this.activity.log({
         organizationId,
         strategyId,
         weekNumber: week,
-        actionId: execution.actionId,
-        step: 'auto_apply',
+        actionId: action.id,
+        step: 'complete',
         title:
-          execution.executionType === 'create_shopify_page'
-            ? 'Hands-off: creating Shopify page'
-            : 'Hands-off: applying Shopify change',
-        detail: execution.summary,
-        status: 'running',
+          execution.status === 'executed'
+            ? this.publishedDoneTitle(execution, action)
+            : `Ready: ${action.title}`,
+        detail: completeDetail,
+        status: 'success',
       });
 
-      try {
-        const approved = await this.approve(organizationId, execution.id);
-        result.execution = approved;
+      return {
+        reply: parsed.reply,
+        supported: true,
+        sentiment: parsed.sentiment,
+        action,
+        routing,
+        result,
+        needsHumanGate,
+      };
+    } catch (err) {
+      const errMessage = err instanceof Error ? err.message : 'Failed';
+      await this.activity.log({
+        organizationId,
+        strategyId,
+        weekNumber: week,
+        actionId: action.id,
+        step: 'failed',
+        title: `Failed: ${action.title}`,
+        detail: errMessage,
+        status: 'error',
+      });
+      throw err;
+    }
+  }
+
+  /** Prepare a week and auto-create campaigns / Shopify changes when integrations allow. */
+  async runWeekAutopilot(
+    organizationId: string,
+    strategyId: string,
+    week: number,
+    _autoApply: boolean,
+    confirm = true
+  ): Promise<BatchRunResponse> {
+    return this.runWeekBatch(organizationId, strategyId, week, { confirm });
+  }
+
+  private canAutoApplyExecution(
+    execution: ExecutionRecord,
+    integrations: OrgIntegrationFlags
+  ): boolean {
+    if (execution.status !== 'previewed') {
+      return false;
+    }
+    switch (execution.executionType) {
+      case 'update_product_seo':
+        return integrations.shopifyWrite;
+      case 'create_shopify_page':
+        return integrations.shopifyContentWrite;
+      case 'create_shopify_blog_article':
+        return integrations.shopifyContentWrite;
+      case 'create_google_ads_campaign':
+        return (
+          isGoogleAdsEnabled() &&
+          integrations.googleAdsReady &&
+          Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim())
+        );
+      case 'create_meta_ads_campaign':
+        return integrations.metaAdsReady;
+      case 'create_mailchimp_drafts':
+        return integrations.mailchimpReady;
+      default:
+        return false;
+    }
+  }
+
+  private autoApplyTitle(execution: ExecutionRecord): string {
+    switch (execution.executionType) {
+      case 'create_meta_ads_campaign':
+        return 'Agent: generating creatives + creating paused Meta campaign';
+      case 'create_google_ads_campaign':
+        return 'Agent: creating paused Google Ads campaign';
+      case 'create_mailchimp_drafts':
+        return 'Agent: creating Mailchimp draft campaigns';
+      case 'create_shopify_page':
+        return 'Agent: creating Shopify page';
+      case 'create_shopify_blog_article':
+        return 'Agent: publishing Shopify blog article';
+      default:
+        return 'Agent: applying Shopify change';
+    }
+  }
+
+  private autoApplyDoneTitle(execution: ExecutionRecord): string {
+    switch (execution.executionType) {
+      case 'publish_instagram_photo':
+        return 'Published: Instagram post';
+      case 'publish_instagram_story':
+        return 'Published: Instagram story';
+      case 'publish_instagram_reel':
+        return 'Published: Instagram Reel';
+      case 'create_meta_ads_campaign':
+        return 'Published: Meta campaign (paused — you enable spend)';
+      case 'create_google_ads_campaign':
+        return 'Published: Google Ads campaign (paused)';
+      case 'create_mailchimp_drafts':
+        return 'Published: Mailchimp email drafts (you send)';
+      case 'create_shopify_page':
+        return 'Published: Shopify page';
+      case 'create_shopify_blog_article':
+        return 'Published: Shopify blog article';
+      default:
+        return 'Published: Shopify change';
+    }
+  }
+
+  /** Clear activity-log title once something actually went live (or was drafted in-channel). */
+  private publishedDoneTitle(execution: ExecutionRecord, action: PlanAction): string {
+    const state = execution.proposedState;
+    switch (execution.executionType) {
+      case 'publish_instagram_photo':
+      case 'publish_instagram_story':
+      case 'publish_instagram_reel': {
+        if (state.kind === 'instagram_publish') {
+          if (state.mediaType === 'carousel') {
+            return `Published: Instagram carousel — ${action.title}`;
+          }
+          if (state.mediaType === 'reel') {
+            return `Published: Instagram Reel — ${action.title}`;
+          }
+          if (state.mediaType === 'story') {
+            return `Published: Instagram story — ${action.title}`;
+          }
+          return `Published: Instagram post — ${action.title}`;
+        }
+        return `Published: Instagram — ${action.title}`;
+      }
+      case 'create_shopify_page':
+        return `Published: Shopify page — ${action.title}`;
+      case 'create_shopify_blog_article':
+        return `Published: Shopify blog — ${action.title}`;
+      case 'create_mailchimp_drafts':
+        return `Published: Mailchimp drafts — ${action.title}`;
+      case 'create_meta_ads_campaign':
+        return `Published: Meta campaign (paused) — ${action.title}`;
+      case 'create_google_ads_campaign':
+        return `Published: Google Ads (paused) — ${action.title}`;
+      default:
+        return `Published: ${action.title}`;
+    }
+  }
+
+  private async tryAutoApplyExecution(
+    organizationId: string,
+    strategyId: string,
+    execution: ExecutionRecord,
+    integrations: OrgIntegrationFlags,
+    week: number,
+    actionId: string
+  ): Promise<ExecutionRecord> {
+    if (!this.canAutoApplyExecution(execution, integrations)) {
+      return execution;
+    }
+
+    if (execution.executionType === 'create_meta_ads_campaign') {
+      const throttle = await evaluateMetaAdsCreateThrottle(organizationId);
+      if (!throttle.allowCreate) {
         await this.activity.log({
           organizationId,
           strategyId,
           weekNumber: week,
-          actionId: execution.actionId,
-          step: 'auto_apply_done',
-          title:
-            execution.executionType === 'create_shopify_page'
-              ? 'Page created in Shopify'
-              : 'Applied in Shopify',
-          detail: approved.summary,
-          status: 'success',
+          actionId,
+          step: 'awaiting_human',
+          title: 'Skipped Meta create — waiting for spend data',
+          detail: throttle.reason,
+          status: 'warn',
         });
-      } catch (err) {
-        result.ok = false;
-        result.error = err instanceof Error ? err.message : 'Auto-apply failed';
-        await this.activity.log({
-          organizationId,
-          strategyId,
-          weekNumber: week,
-          actionId: execution.actionId,
-          step: 'auto_apply_failed',
-          title: 'Auto-apply failed',
-          detail: result.error,
-          status: 'error',
-        });
+        return execution;
       }
     }
+
+    const pace = await getAutopilotPace(organizationId);
+    const caps = await evaluateChannelCaps(organizationId, pace, execution.executionType);
+    if (!caps.allow) {
+      await this.activity.log({
+        organizationId,
+        strategyId,
+        weekNumber: week,
+        actionId,
+        step: 'awaiting_human',
+        title: `Skipped — ${getPaceProfile(pace).label} pace cap`,
+        detail: caps.reason ?? 'Channel cap reached',
+        status: 'warn',
+      });
+      return execution;
+    }
+
+    await this.activity.log({
+      organizationId,
+      strategyId,
+      weekNumber: week,
+      actionId,
+      step: 'auto_apply',
+      title: this.autoApplyTitle(execution),
+      detail: execution.summary,
+      status: 'running',
+    });
+
+    try {
+      const approved = await this.approve(organizationId, execution.id);
+      await this.activity.log({
+        organizationId,
+        strategyId,
+        weekNumber: week,
+        actionId,
+        step: 'auto_apply_done',
+        title: this.autoApplyDoneTitle(approved),
+        detail: approved.summary,
+        status: 'success',
+      });
+      if (approved.status === 'executed' || approved.status === 'skipped') {
+        await this.markPlanActionComplete(organizationId, strategyId, actionId);
+      }
+      return approved;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Auto-create failed';
+      const failed = await query<ExecutionRow>(
+        `UPDATE action_executions SET error_message = $3, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [execution.id, organizationId, message.slice(0, 2000)]
+      );
+      await this.activity.log({
+        organizationId,
+        strategyId,
+        weekNumber: week,
+        actionId,
+        step: 'auto_apply_failed',
+        title: 'Auto-create failed',
+        detail: message,
+        status: 'error',
+      });
+      return failed.rows[0] ? mapRow(failed.rows[0]) : execution;
+    }
+  }
+
+  private metaCreatedSummary(campaignName: string, campaignId: string): string {
+    return `Created paused Meta campaign "${campaignName}" with creatives (ID ${campaignId}) — enable spend in Ads Manager when ready.`;
+  }
+
+  private googleCreatedSummary(campaignName: string): string {
+    return `Created paused Google Ads campaign "${campaignName}" — enable it in Google Ads when ready.`;
   }
 
   async approve(
@@ -641,12 +1463,20 @@ export class ExecutionService {
       return this.approveShopifyPage(organizationId, executionId, row);
     }
 
+    if (row.execution_type === 'create_shopify_blog_article') {
+      return this.approveShopifyBlogArticle(organizationId, executionId, row);
+    }
+
     if (row.execution_type === 'create_google_ads_campaign') {
       return this.approveGoogleAdsCampaign(organizationId, executionId, row);
     }
 
     if (row.execution_type === 'create_meta_ads_campaign') {
       return this.approveMetaAdsCampaign(organizationId, executionId, row);
+    }
+
+    if (row.execution_type === 'create_mailchimp_drafts') {
+      return this.approveMailchimpSequence(organizationId, executionId, row);
     }
 
     if (row.execution_type !== 'update_product_seo') {
@@ -675,6 +1505,18 @@ export class ExecutionService {
     }
 
     const proposed = asProductSeo(row.proposed_state);
+    const pace = await getAutopilotPace(organizationId);
+    const caps = await evaluateChannelCaps(organizationId, pace, 'update_product_seo');
+    if (!caps.allow) {
+      throw new Error(caps.reason ?? 'Product SEO daily cap reached');
+    }
+    const cooldown = await getSeoCooldownTargets(organizationId, pace);
+    if (cooldown.productIds.has(proposed.productId)) {
+      throw new Error(
+        `This product was SEO-updated within the last ${cooldown.cooldownDays} days. Waiting for rankings to settle.`
+      );
+    }
+
     const toApply: ProductSeoState = {
       ...proposed,
       seoTitle: edits?.seoTitle?.trim() || proposed.seoTitle,
@@ -749,6 +1591,10 @@ export class ExecutionService {
 
     try {
       const after = await this.shopify.createPage(ctx.shopDomain, ctx.accessToken, proposed);
+      const pageUrl = shopStorefrontUrl(after.shopDomain ?? ctx.shopDomain, `/pages/${after.handle}`);
+      const createdSummary = after.isPublished
+        ? `Published Shopify page "${after.title}" — ${pageUrl}`
+        : `Created Shopify page draft "${after.title}" — ${pageUrl}`;
 
       const updated = await query<ExecutionRow>(
         `UPDATE action_executions SET
@@ -756,12 +1602,19 @@ export class ExecutionService {
            before_state = NULL,
            proposed_state = $3::jsonb,
            after_state = $4::jsonb,
+           summary = $5,
            error_message = NULL,
            executed_at = NOW(),
            updated_at = NOW()
          WHERE id = $1 AND organization_id = $2
          RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after)]
+        [
+          executionId,
+          organizationId,
+          JSON.stringify(after),
+          JSON.stringify(after),
+          createdSummary,
+        ]
       );
 
       const execution = mapRow(updated.rows[0]);
@@ -775,7 +1628,7 @@ export class ExecutionService {
         platform: execution.platform,
         beforeState: null,
         afterState: after,
-        summary: `Created Shopify page "${after.title}" at /pages/${after.handle}`,
+        summary: createdSummary,
       });
 
       return execution;
@@ -799,6 +1652,7 @@ export class ExecutionService {
 
     try {
       const after = await this.googleAdsCampaign.createPausedCampaign(organizationId, proposed);
+      const createdSummary = this.googleCreatedSummary(after.campaignName);
 
       const updated = await query<ExecutionRow>(
         `UPDATE action_executions SET
@@ -806,12 +1660,13 @@ export class ExecutionService {
            before_state = NULL,
            proposed_state = $3::jsonb,
            after_state = $4::jsonb,
+           summary = $5,
            error_message = NULL,
            executed_at = NOW(),
            updated_at = NOW()
          WHERE id = $1 AND organization_id = $2
          RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after)]
+        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
       );
 
       const execution = mapRow(updated.rows[0]);
@@ -825,7 +1680,7 @@ export class ExecutionService {
         platform: execution.platform,
         beforeState: null,
         afterState: after,
-        summary: `Created paused Google Ads campaign "${after.campaignName}" — enable it in Google Ads when ready.`,
+        summary: createdSummary,
       });
 
       return execution;
@@ -848,7 +1703,33 @@ export class ExecutionService {
     const proposed = asMetaAdsCampaign(row.proposed_state);
 
     try {
-      const after = await this.metaAdsCampaign.createPausedCampaign(organizationId, proposed);
+      if (!proposed.campaignId) {
+        const throttle = await evaluateMetaAdsCreateThrottle(organizationId);
+        if (!throttle.allowCreate) {
+          throw new Error(throttle.reason);
+        }
+      }
+
+      let proposal = proposed;
+      try {
+        proposal = await this.adCampaignLibrary.enrichWithCreatives(
+          organizationId,
+          proposed,
+          {
+            sourceExecutionId: executionId,
+            channel: 'meta',
+            prefer: 'auto',
+          }
+        );
+      } catch (creativeErr) {
+        console.warn(
+          '[execution] Meta creative prep skipped:',
+          creativeErr instanceof Error ? creativeErr.message : creativeErr
+        );
+      }
+
+      const after = await this.metaAdsCampaign.createPausedCampaign(organizationId, proposal);
+      const createdSummary = this.metaCreatedSummary(after.campaignName, after.campaignId);
 
       const updated = await query<ExecutionRow>(
         `UPDATE action_executions SET
@@ -856,12 +1737,86 @@ export class ExecutionService {
            before_state = NULL,
            proposed_state = $3::jsonb,
            after_state = $4::jsonb,
+           summary = $5,
            error_message = NULL,
            executed_at = NOW(),
            updated_at = NOW()
          WHERE id = $1 AND organization_id = $2
          RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after)]
+        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
+      );
+
+      const execution = mapRow(updated.rows[0]);
+
+      try {
+        await this.adCampaignLibrary.upsertFromMetaState(organizationId, after, {
+          sourceExecutionId: execution.id,
+          channel: 'meta',
+        });
+      } catch (libErr) {
+        console.warn(
+          '[execution] failed to save Meta campaign to ads library:',
+          libErr instanceof Error ? libErr.message : libErr
+        );
+      }
+
+      await this.audit.recordExecutionWrite({
+        organizationId,
+        strategyId: execution.strategyId,
+        eventType: 'action_executed',
+        executionId: execution.id,
+        actionId: execution.actionId,
+        platform: execution.platform,
+        beforeState: null,
+        afterState: after,
+        summary: createdSummary,
+      });
+
+      return execution;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Execution failed';
+      await query(
+        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2`,
+        [executionId, organizationId, message.slice(0, 2000)]
+      );
+      throw err;
+    }
+  }
+
+  private async approveMailchimpSequence(
+    organizationId: string,
+    executionId: string,
+    row: ExecutionRow
+  ): Promise<ExecutionRecord> {
+    const proposed = asMailchimpSequence(row.proposed_state);
+    const ctx = await this.mcp.getMailchimpContext(organizationId);
+    if (!ctx?.defaultListId) {
+      throw new Error('Mailchimp is not connected or no default audience is selected');
+    }
+
+    try {
+      const after = await this.mailchimpExecution.createDraftSequence(ctx, proposed);
+      const count = after.createdCampaigns?.length ?? after.emails.length;
+      const archiveUrl = after.createdCampaigns?.find((c) => c.archiveUrl?.startsWith('http'))
+        ?.archiveUrl;
+      const createdSummary = archiveUrl
+        ? `Created ${count} Mailchimp draft(s) for "${after.sequenceName}" — open: ${archiveUrl} (you send from Mailchimp; never auto-sent).`
+        : `Created ${count} Mailchimp draft campaign(s) for "${after.sequenceName}" — review and send in Mailchimp (Hundres never auto-sends).`;
+
+      const updated = await query<ExecutionRow>(
+        `UPDATE action_executions SET
+           status = 'executed',
+           before_state = NULL,
+           proposed_state = $3::jsonb,
+           after_state = $4::jsonb,
+           summary = $5,
+           error_message = NULL,
+           executed_at = NOW(),
+           updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
       );
 
       const execution = mapRow(updated.rows[0]);
@@ -875,7 +1830,7 @@ export class ExecutionService {
         platform: execution.platform,
         beforeState: null,
         afterState: after,
-        summary: `Created paused Meta campaign "${after.campaignName}" — enable it in Meta Ads Manager when ready.`,
+        summary: createdSummary,
       });
 
       return execution;
@@ -913,6 +1868,10 @@ export class ExecutionService {
 
     if (row.execution_type === 'create_shopify_page') {
       return this.rollbackShopifyPage(organizationId, executionId, row);
+    }
+
+    if (row.execution_type === 'create_shopify_blog_article') {
+      return this.rollbackShopifyBlogArticle(organizationId, executionId, row);
     }
 
     if (row.execution_type !== 'update_product_seo') {
@@ -1011,32 +1970,393 @@ export class ExecutionService {
     return execution;
   }
 
+  private isAdHocInstagramContentRequest(
+    message: string,
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  ): boolean {
+    const blob = inferAgentBriefFallback(message, history).fullRequest.toLowerCase();
+    return (
+      /\bugc\b|user.?generated/.test(blob) ||
+      (/instagram/.test(blob) &&
+        /post|publish|reel|story|carousel|photo|video/.test(blob))
+    );
+  }
+
+  private buildAdHocInstagramAction(message: string, goal: string): PlanAction {
+    const brief = inferAgentBriefFallback(message);
+    const blob = brief.fullRequest.toLowerCase();
+    const isUgc = /\bugc\b|user.?generated/.test(blob);
+    const isReel =
+      brief.mediaFormat === 'reel' ||
+      brief.videoSource === 'runway' ||
+      isUgc ||
+      /\breels?\b|\bvideo\b/.test(blob);
+    const title = isUgc
+      ? `Instagram UGC Reel: ${brief.ctaText ?? 'brand product'}`
+      : isReel
+        ? `Instagram Reel: ${brief.ctaText ?? 'brand highlight'}`
+        : `Instagram feed post: ${brief.ctaText ?? 'brand highlight'}`;
+    return {
+      id: `adhoc-${randomUUID()}`,
+      title,
+      channel: 'instagram',
+      day: 'NOW',
+      time: '5 min',
+      impact: 'high',
+      difficulty: 'Easy',
+      why: `Ad-hoc Ask request toward: ${goal}`,
+      outcome: title,
+      kpi: 'engagement',
+    };
+  }
+
+  private mergeAgentExecutionBrief(
+    fromParser: Partial<AgentExecutionBrief> | undefined,
+    message: string,
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  ): AgentExecutionBrief {
+    const fallback = inferAgentBriefFallback(message, history);
+    const recipeSlug = fromParser?.recipeSlug?.trim() || fallback.recipeSlug;
+    const videoSource = fromParser?.videoSource ?? fallback.videoSource;
+    let mediaFormat = fromParser?.mediaFormat ?? fallback.mediaFormat;
+    const imageRecipe =
+      recipeSlug === 'runway-text-to-image' ||
+      recipeSlug === 'runway-product-campaign-image' ||
+      mediaFormat === 'feed' ||
+      mediaFormat === 'carousel' ||
+      /\b(image|photo|still|feed)\b/.test(recipeSlug ?? '');
+    // Video + Runway requests must never silently become static feed photos —
+    // except when the recipe/format is explicitly still/image.
+    if (videoSource === 'runway' && mediaFormat !== 'story' && !imageRecipe) {
+      mediaFormat = 'reel';
+    }
+    if (!mediaFormat && fallback.mediaFormat) {
+      mediaFormat = fallback.mediaFormat;
+    }
+    return {
+      fullRequest: fromParser?.fullRequest?.trim() || fallback.fullRequest,
+      imageSource: fromParser?.imageSource ?? fallback.imageSource,
+      imageSearchQuery: fromParser?.imageSearchQuery?.trim() || fallback.imageSearchQuery,
+      slideCount: fromParser?.slideCount ?? fallback.slideCount,
+      ctaText: fromParser?.ctaText?.trim() || fallback.ctaText,
+      mediaFormat: imageRecipe && mediaFormat === 'reel' ? 'feed' : mediaFormat,
+      videoUrl: fromParser?.videoUrl?.trim() || fallback.videoUrl,
+      videoSource: imageRecipe ? undefined : videoSource,
+      recipeSlug,
+      productImageUrl: fromParser?.productImageUrl?.trim() || undefined,
+      characterImageUrl: fromParser?.characterImageUrl?.trim() || undefined,
+    };
+  }
+
+  private async runInstagramPublish(
+    organizationId: string,
+    strategyId: string,
+    action: PlanAction,
+    strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
+    route: ReturnType<typeof resolveActionRoute>,
+    agentBrief?: AgentExecutionBrief | null
+  ): Promise<ExecutionPreviewResponse> {
+    const pace = await getAutopilotPace(organizationId);
+    const caps = await evaluateChannelCaps(organizationId, pace, route.executionType);
+    if (!caps.allow) {
+      throw new Error(caps.reason ?? 'Instagram pace cap reached');
+    }
+
+    const profile = await getBusinessProfile(organizationId);
+    const businessContext = [profile.website, profile.oneLiner, profile.audience]
+      .filter(Boolean)
+      .join(' · ');
+
+    const published = await this.instagram.publishPhotoForAction({
+      organizationId,
+      action,
+      goal: strategy.goal,
+      businessContext: businessContext || strategy.context,
+      profile,
+      brief: agentBrief,
+    });
+
+    const summary =
+      published.mediaType === 'story'
+        ? published.permalink
+          ? `Published Instagram story — ${published.permalink}`
+          : `Published Instagram story (media ${published.mediaId ?? 'created'})`
+        : published.mediaType === 'reel'
+          ? published.permalink
+            ? `Published Instagram Reel via Runway${published.runwayTaskId ? ` (${published.runwayTaskId})` : ''} — ${published.permalink}`
+            : `Published Instagram Reel via Runway (media ${published.mediaId ?? 'created'})`
+        : published.mediaType === 'carousel' && published.slideCount
+        ? published.permalink
+          ? `Published ${published.slideCount}-slide carousel to Instagram — ${published.permalink}`
+          : `Published ${published.slideCount}-slide carousel to Instagram (media ${published.mediaId ?? 'created'})`
+        : published.permalink
+          ? `Published to Instagram — ${published.permalink}`
+          : `Published to Instagram (media ${published.mediaId ?? 'created'})`;
+
+    const insert = await query<ExecutionRow>(
+      `INSERT INTO action_executions (
+         organization_id, strategy_id, action_id, platform, execution_type,
+         status, risk_level, summary, target_label, before_state, proposed_state,
+         after_state, executed_at
+       ) VALUES ($1, $2, $3, $4, $5, 'executed', $6, $7, $8, NULL, $9::jsonb, $9::jsonb, NOW())
+       RETURNING *`,
+      [
+        organizationId,
+        strategyId,
+        action.id,
+        route.platform,
+        route.executionType,
+        route.riskLevel,
+        summary,
+        action.title,
+        JSON.stringify(published),
+      ]
+    );
+
+    const execution = mapRow(insert.rows[0]);
+
+    await this.audit.recordExecutionWrite({
+      organizationId,
+      strategyId: execution.strategyId,
+      eventType: 'action_executed',
+      executionId: execution.id,
+      actionId: execution.actionId,
+      platform: execution.platform,
+      beforeState: null,
+      afterState: published,
+      summary,
+    });
+
+    await this.markPlanActionComplete(organizationId, strategyId, action.id);
+
+    return {
+      execution,
+      mode: 'automated_write',
+      canExecute: false,
+      scopeWarning: null,
+      reasoning: published.reasoning ?? undefined,
+    };
+  }
+
+  private async runShopifyBlogPreview(
+    organizationId: string,
+    strategyId: string,
+    action: PlanAction,
+    strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
+    route: ReturnType<typeof resolveActionRoute>,
+    shopifyContentWrite: boolean
+  ): Promise<ExecutionPreviewResponse> {
+    const ctx = await this.mcp.getShopifyContext(organizationId);
+    if (!ctx) {
+      throw new Error('Connect Shopify in Integrations before creating blog articles.');
+    }
+
+    const profile = await getBusinessProfile(organizationId);
+    const businessContext = [profile.website, profile.oneLiner, profile.audience]
+      .filter(Boolean)
+      .join(' · ');
+
+    const proposed = await this.claude.generateShopifyBlogArticle({
+      action,
+      goal: strategy.goal,
+      businessContext: businessContext || strategy.context,
+    });
+
+    const live = isShopifyAutoPublishLiveEnabled();
+    const summary = shopifyContentWrite
+      ? `${live ? 'Publish' : 'Draft'} Shopify blog article "${proposed.title}".`
+      : `Draft article "${proposed.title}" — approve after write_content scope is granted.`;
+
+    const insert = await query<ExecutionRow>(
+      `INSERT INTO action_executions (
+         organization_id, strategy_id, action_id, platform, execution_type,
+         status, risk_level, summary, target_label, before_state, proposed_state
+       ) VALUES ($1, $2, $3, $4, $5, 'previewed', $6, $7, $8, NULL, $9::jsonb)
+       RETURNING *`,
+      [
+        organizationId,
+        strategyId,
+        action.id,
+        route.platform,
+        route.executionType,
+        route.riskLevel,
+        summary,
+        proposed.title,
+        JSON.stringify(proposed),
+      ]
+    );
+
+    return {
+      execution: mapRow(insert.rows[0]),
+      mode: 'automated_write',
+      canExecute: shopifyContentWrite && isAutomatedWrite(route),
+      scopeWarning: shopifyContentWrite
+        ? null
+        : 'Blog publish requires write_content — add the scope in Shopify Partners, reconnect, then approve.',
+    };
+  }
+
+  private async approveShopifyBlogArticle(
+    organizationId: string,
+    executionId: string,
+    row: ExecutionRow
+  ): Promise<ExecutionRecord> {
+    const ctx = await this.mcp.getShopifyContext(organizationId);
+    if (!ctx) {
+      throw new Error('Shopify is not connected');
+    }
+
+    const config = await this.mcp.getPlatformConfig(organizationId, 'shopify');
+    if (!shopifyHasWriteContentScope(config?.grantedScopes)) {
+      throw new Error(
+        'Missing write_content scope. Disconnect and reconnect Shopify, then approve all requested permissions.'
+      );
+    }
+
+    const proposed = asShopifyBlogArticle(row.proposed_state);
+    const blogs = await this.shopify.listBlogs(ctx.shopDomain, ctx.accessToken);
+    const blog = this.shopify.pickDefaultBlog(blogs);
+
+    const toApply: ShopifyBlogArticleState = {
+      ...proposed,
+      blogId: blog.id,
+      blogHandle: blog.handle,
+      shopDomain: ctx.shopDomain,
+    };
+
+    try {
+      const after = await this.shopify.createBlogArticle(
+        ctx.shopDomain,
+        ctx.accessToken,
+        toApply
+      );
+
+      const createdSummary = after.isPublished
+        ? `Published blog article "${after.title}" — ${shopStorefrontUrl(
+            after.shopDomain ?? ctx.shopDomain,
+            `/blogs/${after.blogHandle}/${after.handle}`
+          )}`
+        : `Created blog draft "${after.title}" — ${shopStorefrontUrl(
+            after.shopDomain ?? ctx.shopDomain,
+            `/blogs/${after.blogHandle}/${after.handle}`
+          )}`;
+
+      const updated = await query<ExecutionRow>(
+        `UPDATE action_executions SET
+           status = 'executed',
+           before_state = NULL,
+           proposed_state = $3::jsonb,
+           after_state = $4::jsonb,
+           summary = $5,
+           error_message = NULL,
+           executed_at = NOW(),
+           updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
+      );
+
+      const execution = mapRow(updated.rows[0]);
+
+      await this.audit.recordExecutionWrite({
+        organizationId,
+        strategyId: execution.strategyId,
+        eventType: 'action_executed',
+        executionId: execution.id,
+        actionId: execution.actionId,
+        platform: execution.platform,
+        beforeState: null,
+        afterState: after,
+        summary: createdSummary,
+      });
+
+      return execution;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Execution failed';
+      await query(
+        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2`,
+        [executionId, organizationId, message.slice(0, 2000)]
+      );
+      throw err;
+    }
+  }
+
+  private async rollbackShopifyBlogArticle(
+    organizationId: string,
+    executionId: string,
+    row: ExecutionRow
+  ): Promise<ExecutionRecord> {
+    const afterState = row.after_state ? asShopifyBlogArticle(row.after_state) : null;
+    if (!afterState?.articleId) {
+      throw new Error('No article ID stored for rollback');
+    }
+
+    const ctx = await this.mcp.getShopifyContext(organizationId);
+    if (!ctx) {
+      throw new Error('Shopify is not connected');
+    }
+
+    await this.shopify.deleteArticle(ctx.shopDomain, ctx.accessToken, afterState.articleId);
+
+    const updated = await query<ExecutionRow>(
+      `UPDATE action_executions SET
+         status = 'rolled_back',
+         rolled_back_at = NOW(),
+         updated_at = NOW()
+       WHERE id = $1 AND organization_id = $2 RETURNING *`,
+      [executionId, organizationId]
+    );
+
+    const execution = mapRow(updated.rows[0]);
+
+    await this.audit.recordExecutionWrite({
+      organizationId,
+      strategyId: execution.strategyId,
+      eventType: 'action_rolled_back',
+      executionId: execution.id,
+      actionId: execution.actionId,
+      platform: execution.platform,
+      beforeState: afterState,
+      afterState: null,
+      summary: `Deleted blog article "${afterState.title}" during rollback`,
+    });
+
+    return execution;
+  }
+
   private async generateInstagramAssistDeliverable(
     organizationId: string,
     action: PlanAction,
     strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
     profile: BusinessProfile,
-    businessContext: string | null | undefined
+    businessContext: string | null | undefined,
+    agentBrief?: AgentExecutionBrief | null
   ) {
-    const imagePick = await pickBrandImageForInstagramAssist({
+    const imagePicks = await pickInstagramImagesForAssist({
       organizationId,
       profile,
       action,
+      brief: agentBrief,
     });
 
     return this.claude.generateInstagramAssist({
       action,
       goal: strategy.goal,
       businessContext,
-      image: imagePick
-        ? {
-            url: imagePick.proposedImageUrl,
-            alt: imagePick.imageAlt,
-            source: imagePick.imageSource,
-            attribution: imagePick.imageAttribution,
-            rationale: imagePick.imageRationale,
-          }
-        : null,
+      images: imagePicks.map((pick) => ({
+        url: pick.proposedImageUrl,
+        alt: pick.imageAlt,
+        source: pick.imageSource,
+        attribution: pick.imageAttribution,
+        rationale: pick.imageRationale,
+      })),
+      userInstructions: agentBrief?.fullRequest ?? null,
+      ctaText: agentBrief?.ctaText ?? null,
+      mediaKind:
+        agentBrief?.mediaFormat === 'story' || isInstagramStoryAction(action)
+          ? 'story'
+          : undefined,
     });
   }
 
@@ -1045,7 +2365,8 @@ export class ExecutionService {
     strategyId: string,
     action: PlanAction,
     strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
-    route: ReturnType<typeof resolveActionRoute>
+    route: ReturnType<typeof resolveActionRoute>,
+    agentBrief?: AgentExecutionBrief | null
   ): Promise<ExecutionPreviewResponse> {
     const profile = await getBusinessProfile(organizationId);
     const businessContext = [
@@ -1067,7 +2388,8 @@ export class ExecutionService {
             action,
             strategy,
             profile,
-            businessContext || strategy.context
+            businessContext || strategy.context,
+            agentBrief
           )
         : intent === 'shopify_blog' && ctx
         ? await this.claude.generateShopifyBlogAssist({
@@ -1144,8 +2466,9 @@ export class ExecutionService {
       businessContext: businessContext || strategy.context,
     });
 
+    const live = isShopifyAutoPublishLiveEnabled();
     const summary = shopifyContentWrite
-      ? `Draft Shopify page "${proposed.title}" at /pages/${proposed.handle}.`
+      ? `${live ? 'Publish' : 'Draft'} Shopify page "${proposed.title}" at /pages/${proposed.handle}.`
       : `Draft page "${proposed.title}" — approve after write_content scope is granted to publish via Shopify MCP.`;
 
     const insert = await query<ExecutionRow>(
@@ -1205,7 +2528,7 @@ export class ExecutionService {
     });
 
     const devTokenConfigured = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
-    const summary = `Draft Search campaign "${proposed.campaignName}" ($${proposed.dailyBudgetUsd}/day) — approve to create paused in Google Ads.`;
+    const summary = `Draft Search campaign "${proposed.campaignName}" ($${proposed.dailyBudgetUsd}/day) — agent creates it paused in Google Ads.`;
 
     const insert = await query<ExecutionRow>(
       `INSERT INTO action_executions (
@@ -1248,6 +2571,11 @@ export class ExecutionService {
       throw new Error('Connect Meta Ads in Integrations and select an ad account before creating campaigns.');
     }
 
+    const throttle = await evaluateMetaAdsCreateThrottle(organizationId);
+    if (!throttle.allowCreate) {
+      throw new Error(throttle.reason);
+    }
+
     const profile = await getBusinessProfile(organizationId);
     const businessContext = [profile.website, profile.oneLiner, profile.audience]
       .filter(Boolean)
@@ -1261,11 +2589,30 @@ export class ExecutionService {
       businessContext: businessContext || strategy.context,
       websiteUrl: profile.website,
       metaSnapshotText: snapshot?.text ?? null,
+      performanceContext: formatMetaAdsPerformanceForCreativePrompt(throttle),
     });
 
+    // Hands-off: agent fills creatives immediately (library → Canva → Runway)
+    let enriched = proposed;
+    try {
+      enriched = await this.adCampaignLibrary.enrichWithCreatives(organizationId, proposed, {
+        channel: 'meta',
+        prefer: 'auto',
+      });
+    } catch (creativeErr) {
+      console.warn(
+        '[execution] Meta creative enrichment at preview skipped:',
+        creativeErr instanceof Error ? creativeErr.message : creativeErr
+      );
+    }
+
+    const imageCount = enriched.ads.filter((a) => a.imageUrl).length;
     const symbol =
-      proposed.currencyCode === 'GBP' ? '£' : proposed.currencyCode === 'EUR' ? '€' : '$';
-    const summary = `Draft Meta campaign "${proposed.campaignName}" (${symbol}${proposed.dailyBudget}/day) — approve to create paused in Meta Ads Manager.`;
+      enriched.currencyCode === 'GBP' ? '£' : enriched.currencyCode === 'EUR' ? '€' : '$';
+    const summary =
+      imageCount > 0
+        ? `Agent drafted Meta campaign "${enriched.campaignName}" (${symbol}${enriched.dailyBudget}/day) with ${imageCount} creative image${imageCount === 1 ? '' : 's'} — will create paused in Ads Manager.`
+        : `Agent drafted Meta campaign "${enriched.campaignName}" (${symbol}${enriched.dailyBudget}/day) — creatives pending; will create paused in Ads Manager.`;
 
     const insert = await query<ExecutionRow>(
       `INSERT INTO action_executions (
@@ -1281,7 +2628,84 @@ export class ExecutionService {
         route.executionType,
         route.riskLevel,
         summary,
-        proposed.campaignName,
+        enriched.campaignName,
+        JSON.stringify(enriched),
+      ]
+    );
+
+    const execution = mapRow(insert.rows[0]);
+    try {
+      await this.adCampaignLibrary.upsertFromMetaState(organizationId, enriched, {
+        sourceExecutionId: execution.id,
+        channel: 'meta',
+      });
+    } catch (libErr) {
+      console.warn(
+        '[execution] failed to save Meta draft to ads library:',
+        libErr instanceof Error ? libErr.message : libErr
+      );
+    }
+
+    return {
+      execution,
+      mode: 'automated_write',
+      canExecute: isAutomatedWrite(route),
+      scopeWarning: null,
+    };
+  }
+
+  private async runMailchimpSequencePreview(
+    organizationId: string,
+    strategyId: string,
+    action: PlanAction,
+    strategy: NonNullable<Awaited<ReturnType<StrategyService['getById']>>>,
+    route: ReturnType<typeof resolveActionRoute>
+  ): Promise<ExecutionPreviewResponse> {
+    const ctx = await this.mcp.getMailchimpContext(organizationId);
+    if (!ctx?.defaultListId) {
+      throw new Error(
+        'Connect Mailchimp in Integrations and select a default audience before creating email drafts.'
+      );
+    }
+
+    const profile = await getBusinessProfile(organizationId);
+    const businessContext = [profile.website, profile.oneLiner, profile.audience]
+      .filter(Boolean)
+      .join(' · ');
+
+    const ping = await import('../lib/mailchimpClient.js').then((m) => m.mailchimpPing(ctx));
+    const fromName =
+      ctx.accountName?.trim() ||
+      profile.oneLiner?.split(/[.!—–-]/)[0]?.trim() ||
+      'Team';
+    const replyTo = ping.email?.trim() || 'hello@example.com';
+
+    const proposed = await this.claude.generateMailchimpSequence({
+      action,
+      goal: strategy.goal,
+      businessContext: businessContext || strategy.context,
+      fromName,
+      replyTo,
+      defaultAudienceName: null,
+    });
+
+    const summary = `Agent drafted ${proposed.emails.length} email(s) for "${proposed.sequenceName}" — will create as Mailchimp drafts (not sent).`;
+
+    const insert = await query<ExecutionRow>(
+      `INSERT INTO action_executions (
+         organization_id, strategy_id, action_id, platform, execution_type,
+         status, risk_level, summary, target_label, before_state, proposed_state
+       ) VALUES ($1, $2, $3, $4, $5, 'previewed', $6, $7, $8, NULL, $9::jsonb)
+       RETURNING *`,
+      [
+        organizationId,
+        strategyId,
+        action.id,
+        route.platform,
+        route.executionType,
+        route.riskLevel,
+        summary,
+        proposed.sequenceName,
         JSON.stringify(proposed),
       ]
     );
@@ -1306,12 +2730,22 @@ export class ExecutionService {
       throw new Error('Connect Shopify in Integrations before executing store changes.');
     }
 
-    const current = await this.shopify.fetchFirstActiveProduct(
+    const pace = await getAutopilotPace(organizationId);
+    const caps = await evaluateChannelCaps(organizationId, pace, 'update_product_seo');
+    if (!caps.allow) {
+      throw new Error(caps.reason ?? 'Product SEO daily cap reached for this pace.');
+    }
+
+    const cooldown = await getSeoCooldownTargets(organizationId, pace);
+    const current = await this.shopify.fetchActiveProductForSeo(
       ctx.shopDomain,
-      ctx.accessToken
+      ctx.accessToken,
+      cooldown.productIds
     );
     if (!current) {
-      throw new Error('No active products found in your Shopify store.');
+      throw new Error(
+        `All active products were SEO-updated within the last ${cooldown.cooldownDays} days. Waiting for rankings to settle — pick Intense breadth next week on new products, or wait.`
+      );
     }
 
     const proposal = this.shopify.buildProductSeoProposal(action, current);
@@ -1364,6 +2798,45 @@ export class ExecutionService {
     return { strategy, action };
   }
 
+  /** Sequential orchestrator: auto-apply non-ad previews; only ads pause for human spend enablement. */
+  async finalizeForSequentialStep(
+    organizationId: string,
+    execution: ExecutionRecord
+  ): Promise<{ execution: ExecutionRecord; needsHumanGate: boolean }> {
+    const integrations = await this.getIntegrationFlags(organizationId);
+    let current = execution;
+
+    if (current.status === 'previewed' && this.canAutoApplyExecution(current, integrations)) {
+      if (current.executionType === 'create_meta_ads_campaign') {
+        const throttle = await evaluateMetaAdsCreateThrottle(organizationId);
+        if (!throttle.allowCreate) {
+          return { execution: current, needsHumanGate: true };
+        }
+      }
+      current = await this.approve(organizationId, current.id);
+    }
+
+    const isPaidAd =
+      current.executionType === 'create_meta_ads_campaign' ||
+      current.executionType === 'create_google_ads_campaign';
+
+    if (isPaidAd && current.status === 'executed') {
+      return { execution: current, needsHumanGate: true };
+    }
+
+    if (current.status === 'failed') {
+      throw new Error(current.errorMessage ?? 'Action failed');
+    }
+
+    return { execution: current, needsHumanGate: false };
+  }
+
+  async getIntegrationFlagsPublic(
+    organizationId: string
+  ): Promise<OrgIntegrationFlags> {
+    return this.getIntegrationFlags(organizationId);
+  }
+
   private async getIntegrationFlags(
     organizationId: string
   ): Promise<OrgIntegrationFlags> {
@@ -1378,9 +2851,18 @@ export class ExecutionService {
       shopifyContentWrite: shopifyHasWriteContentScope(shopifyConfig?.grantedScopes),
       metaAds: Boolean(metaConn),
       metaAdsReady: Boolean(metaConn?.config?.adAccountId),
-      googleAds: Boolean(adsConn),
-      googleAdsReady: Boolean(adsConn?.config?.customerId),
+      googleAds: isGoogleAdsEnabled() && Boolean(adsConn),
+      googleAdsReady:
+        isGoogleAdsEnabled() && Boolean(adsConn?.config?.customerId),
       analytics: connections.some((c) => c.platform === 'google_analytics'),
+      canva: connections.some((c) => c.platform === 'canva'),
+      canvaReady: Boolean(await this.mcp.getCanvaContext(organizationId)),
+      runway: isRunwayConfigured(),
+      runwayReady: isRunwayConfigured(),
+      instagram: connections.some((c) => c.platform === 'instagram'),
+      instagramReady: Boolean(await this.mcp.getInstagramContext(organizationId)),
+      mailchimp: connections.some((c) => c.platform === 'mailchimp'),
+      mailchimpReady: await this.mcp.isMailchimpReady(organizationId),
     };
   }
 

@@ -7,7 +7,7 @@ export interface IntegrationDefinition {
   description: string;
   tier: IntegrationTier;
   status: IntegrationStatus;
-  platform?: 'google_analytics' | 'google_ads' | 'meta_ads' | 'shopify' | 'unsplash' | 'instagram';
+  platform?: 'google_analytics' | 'google_ads' | 'meta_ads' | 'shopify' | 'unsplash' | 'canva' | 'runway' | 'instagram' | 'mailchimp';
 }
 
 export const INTEGRATIONS: IntegrationDefinition[] = [
@@ -22,9 +22,9 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
   {
     id: 'google_ads',
     name: 'Google Ads',
-    description: 'Paid search spend and campaigns — analytical core via MCP.',
+    description: 'Paid search spend and campaigns — coming soon.',
     tier: 'required',
-    status: 'available',
+    status: 'coming_soon',
     platform: 'google_ads',
   },
   {
@@ -52,12 +52,36 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     platform: 'unsplash',
   },
   {
+    id: 'canva',
+    name: 'Canva',
+    description: 'Create and export Instagram creatives via MCP — chain to Instagram publishing.',
+    tier: 'nice_to_have',
+    status: 'available',
+    platform: 'canva',
+  },
+  {
+    id: 'runway',
+    name: 'Runway',
+    description: 'Realistic AI video for Instagram Reels — text/image to video via MCP.',
+    tier: 'nice_to_have',
+    status: 'available',
+    platform: 'runway',
+  },
+  {
     id: 'instagram',
     name: 'Instagram',
     description: 'Organic posts, stories, reels, comments, and likes via MCP (Meta OAuth).',
     tier: 'nice_to_have',
     status: 'available',
     platform: 'instagram',
+  },
+  {
+    id: 'mailchimp',
+    name: 'Mailchimp',
+    description: 'Audiences and email campaign drafts via MCP — win-back and list-building (send stays in Mailchimp).',
+    tier: 'nice_to_have',
+    status: 'available',
+    platform: 'mailchimp',
   },
   {
     id: 'meta_ad_library',

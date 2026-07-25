@@ -43,6 +43,18 @@ function mapRow(row: ActivityRow): AutopilotActivityRecord {
   };
 }
 
+/** Steps that are outcomes users care about — always keep these in the feed. */
+const OUTCOME_STEPS = [
+  'complete',
+  'auto_apply_done',
+  'auto_apply_failed',
+  'failed',
+  'skipped',
+  'awaiting_human',
+  'human_confirmed',
+  'checkpoint',
+] as const;
+
 export class AutopilotActivityService {
   async log(input: {
     organizationId: string;
@@ -65,25 +77,59 @@ export class AutopilotActivityService {
         input.actionId ?? null,
         input.step,
         input.title,
-        input.detail,
+        input.detail.slice(0, 4000),
         input.status ?? 'info',
       ]
     );
   }
 
+  /**
+   * Recent stream + pinned outcomes.
+   * Autopilot cycles flood action_plan / week_reasoning rows; a plain LIMIT 300
+   * was dropping real Instagram publishes out of the window and making the UI slow.
+   */
   async listForStrategy(
     organizationId: string,
     strategyId: string,
-    limit = 40
+    options?: { recentLimit?: number; outcomeLimit?: number }
   ): Promise<AutopilotActivityRecord[]> {
-    const result = await query<ActivityRow>(
-      `SELECT * FROM autopilot_activity
-       WHERE organization_id = $1 AND strategy_id = $2
-       ORDER BY created_at DESC
-       LIMIT $3`,
-      [organizationId, strategyId, limit]
+    const recentLimit = Math.min(400, Math.max(50, options?.recentLimit ?? 120));
+    const outcomeLimit = Math.min(300, Math.max(50, options?.outcomeLimit ?? 150));
+
+    const [recent, outcomes] = await Promise.all([
+      query<ActivityRow>(
+        `SELECT id, organization_id, strategy_id, week_number, action_id, step, title,
+                left(detail, 1200) AS detail, status, created_at
+         FROM autopilot_activity
+         WHERE organization_id = $1 AND strategy_id = $2
+         ORDER BY created_at DESC
+         LIMIT $3`,
+        [organizationId, strategyId, recentLimit]
+      ),
+      query<ActivityRow>(
+        `SELECT id, organization_id, strategy_id, week_number, action_id, step, title,
+                left(detail, 1200) AS detail, status, created_at
+         FROM autopilot_activity
+         WHERE organization_id = $1 AND strategy_id = $2
+           AND (
+             step = ANY($3::text[])
+             OR title ILIKE 'Published:%'
+             OR status IN ('success', 'error')
+           )
+         ORDER BY created_at DESC
+         LIMIT $4`,
+        [organizationId, strategyId, [...OUTCOME_STEPS], outcomeLimit]
+      ),
+    ]);
+
+    const byId = new Map<string, AutopilotActivityRecord>();
+    for (const row of [...recent.rows, ...outcomes.rows]) {
+      byId.set(row.id, mapRow(row));
+    }
+
+    return Array.from(byId.values()).sort((a, b) =>
+      a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0
     );
-    return result.rows.map(mapRow).reverse();
   }
 
   async listSince(
@@ -92,9 +138,12 @@ export class AutopilotActivityService {
     sinceIso: string
   ): Promise<AutopilotActivityRecord[]> {
     const result = await query<ActivityRow>(
-      `SELECT * FROM autopilot_activity
+      `SELECT id, organization_id, strategy_id, week_number, action_id, step, title,
+              left(detail, 1200) AS detail, status, created_at
+       FROM autopilot_activity
        WHERE organization_id = $1 AND strategy_id = $2 AND created_at > $3
-       ORDER BY created_at ASC`,
+       ORDER BY created_at ASC
+       LIMIT 500`,
       [organizationId, strategyId, sinceIso]
     );
     return result.rows.map(mapRow);
@@ -120,7 +169,7 @@ export class AutopilotActivityService {
              AND newer.strategy_id = a.strategy_id
              AND newer.action_id = a.action_id
              AND newer.created_at > a.created_at
-             AND newer.step IN ('complete', 'failed', 'skipped')
+             AND newer.step IN ('complete', 'failed', 'skipped', 'auto_apply_done', 'auto_apply_failed')
          )
        ORDER BY a.action_id, a.created_at DESC`,
       [organizationId, strategyId]
@@ -134,7 +183,8 @@ export class AutopilotActivityService {
         actionId: row.action_id,
         step: 'failed',
         title: `Interrupted: ${row.title.replace(/^Executing: /, '')}`,
-        detail: 'Previous run was interrupted (timeout or server restart). Click Confirm & prepare this week to try again.',
+        detail:
+          'Previous run was interrupted (timeout or server restart). Click Confirm & prepare this week to try again.',
         status: 'error',
       });
     }

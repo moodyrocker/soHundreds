@@ -7,8 +7,11 @@ import { Chip } from '@/components/hundres/chip';
 import {
   isAssistDeliverable,
   isGoogleAdsCampaign,
+  isInstagramPublish,
+  isMailchimpSequence,
   isMetaAdsCampaign,
   isProductSeo,
+  isShopifyBlogArticle,
   isShopifyPage,
   formatAdBudget,
   extractExecutionReasoning,
@@ -41,6 +44,8 @@ type Props = {
   scopeWarning?: string | null;
   /** Inline under action summary — no outer card or duplicate header. */
   embedded?: boolean;
+  onRunAction?: () => void;
+  runningAction?: boolean;
   onPrepare?: () => void;
   preparing?: boolean;
   onRestart?: () => void;
@@ -82,6 +87,8 @@ export function ActionDeliverableCard({
   aiReasoning,
   scopeWarning,
   embedded,
+  onRunAction,
+  runningAction,
   onPrepare,
   preparing,
   onRestart,
@@ -90,6 +97,7 @@ export function ActionDeliverableCard({
   approving,
   canExecute = true,
 }: Props) {
+  const isRunning = runningAction || preparing || restarting || pending;
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(true);
   const [whyOpen, setWhyOpen] = useState(false);
@@ -112,6 +120,12 @@ export function ActionDeliverableCard({
     execution && isProductSeo(execution.proposedState) ? execution.proposedState : null;
   const page =
     execution && isShopifyPage(execution.proposedState) ? execution.proposedState : null;
+  const blogArticle =
+    execution && isShopifyBlogArticle(execution.proposedState)
+      ? execution.proposedState
+      : null;
+  const igPublish =
+    execution && isInstagramPublish(execution.proposedState) ? execution.proposedState : null;
   const googleCampaign =
     execution && isGoogleAdsCampaign(execution.proposedState)
       ? execution.proposedState
@@ -120,11 +134,15 @@ export function ActionDeliverableCard({
     execution && isMetaAdsCampaign(execution.proposedState)
       ? execution.proposedState
       : null;
+  const mailchimpSequence =
+    execution && isMailchimpSequence(execution.proposedState)
+      ? execution.proposedState
+      : null;
   const isAdvertPlan = isAdvertPlanAction(channel, execution);
 
   const needsApproval =
     execution?.status === 'previewed' &&
-    (page || seo || googleCampaign || metaCampaign) &&
+    (page || blogArticle || seo || googleCampaign || metaCampaign || mailchimpSequence) &&
     Boolean(onApprove);
 
   const draftReasoning =
@@ -185,26 +203,36 @@ export function ActionDeliverableCard({
               {kpi}
             </p>
           ) : null}
-          {onPrepare ? (
+          {onRunAction ? (
             <Button
               variant="primary"
               type="button"
-              disabled={preparing || pending}
+              disabled={isRunning}
+              onClick={onRunAction}
+              style={{ justifySelf: 'start', marginTop: 4 }}
+            >
+              {isRunning ? 'Running agent…' : 'Run this action'}
+            </Button>
+          ) : onPrepare ? (
+            <Button
+              variant="primary"
+              type="button"
+              disabled={isRunning}
               onClick={onPrepare}
               style={{ justifySelf: 'start', marginTop: 4 }}
             >
-              {preparing || pending ? 'Preparing…' : 'Confirm & prepare this week'}
+              {isRunning ? 'Running agent…' : 'Run this action'}
             </Button>
           ) : null}
           {onRestart ? (
             <Button
               variant="ghost"
               type="button"
-              disabled={restarting || pending}
+              disabled={isRunning}
               onClick={onRestart}
               style={{ justifySelf: 'start' }}
             >
-              {restarting || pending ? 'Restarting…' : 'Restart this action'}
+              {isRunning ? 'Regenerating…' : 'Regenerate'}
             </Button>
           ) : null}
         </div>
@@ -379,15 +407,167 @@ export function ActionDeliverableCard({
         </div>
       ) : null}
 
+      {expanded && igPublish && execution?.status === 'executed' ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            {igPublish.mediaType === 'reel'
+              ? 'Published Instagram Reel'
+              : igPublish.mediaType === 'story'
+                ? 'Published Instagram Story'
+                : 'Published to Instagram'}
+          </div>
+          <Chip variant="success">
+            {igPublish.mediaType === 'reel' ? 'Live Reel' : 'Live on Instagram'}
+          </Chip>
+          {igPublish.mediaType === 'reel' && igPublish.videoUrl ? (
+            <video
+              src={igPublish.videoUrl}
+              controls
+              playsInline
+              style={{
+                width: '100%',
+                maxWidth: 360,
+                borderRadius: 8,
+                background: '#000',
+                aspectRatio: '9 / 16',
+              }}
+            />
+          ) : (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img
+              src={igPublish.imageUrl}
+              alt="Published Instagram post"
+              style={{
+                width: '100%',
+                maxWidth: 360,
+                borderRadius: 8,
+                objectFit: 'cover',
+                aspectRatio: '1 / 1',
+              }}
+            />
+          )}
+          <div
+            style={{
+              padding: '12px 14px',
+              borderRadius: 8,
+              background: 'var(--surface-2, rgba(255,255,255,0.03))',
+              fontSize: 13,
+              lineHeight: 1.55,
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {igPublish.caption}
+          </div>
+          {igPublish.imageSource ? (
+            <p className="auth-hint" style={{ margin: 0, fontSize: 12 }}>
+              Image source: {igPublish.imageSource}
+              {igPublish.imageSource === 'canva' && igPublish.canvaDesignId
+                ? ` · design ${igPublish.canvaDesignId}`
+                : ''}
+            </p>
+          ) : null}
+          {igPublish.imageRationale ? (
+            <p className="auth-hint" style={{ margin: 0, fontSize: 12, lineHeight: 1.5 }}>
+              {igPublish.imageRationale}
+            </p>
+          ) : null}
+          {igPublish.canvaEditUrl ? (
+            <Link
+              href={igPublish.canvaEditUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: 13 }}
+            >
+              Open design in Canva
+            </Link>
+          ) : null}
+          {igPublish.permalink ? (
+            <Link href={igPublish.permalink} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13 }}>
+              {igPublish.mediaType === 'story'
+                ? 'View story on Instagram'
+                : igPublish.mediaType === 'reel'
+                  ? 'View Reel on Instagram'
+                  : igPublish.mediaType === 'carousel'
+                    ? 'View carousel on Instagram'
+                    : 'View post on Instagram'}
+            </Link>
+          ) : igPublish.mediaType === 'story' ? (
+            <p className="auth-hint" style={{ margin: 0, fontSize: 12 }}>
+              Story published (Stories often have no lasting public link — check Instagram Stories / archive).
+            </p>
+          ) : null}
+          {igPublish.imageAttribution ? (
+            <p className="auth-hint" style={{ margin: 0, fontSize: 11 }}>
+              {igPublish.imageAttribution}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {expanded && blogArticle && execution?.status === 'executed' ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Your deliverable
+          </div>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
+            {blogArticle.isPublished ? 'Published' : 'Draft'} in Shopify · /blogs/{blogArticle.blogHandle}/{blogArticle.handle}
+          </div>
+          <strong style={{ fontSize: 14 }}>{blogArticle.title}</strong>
+          {blogArticle.shopDomain && blogArticle.blogHandle ? (
+            <Link
+              href={`https://${blogArticle.shopDomain}/blogs/${blogArticle.blogHandle}/${blogArticle.handle}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: 13 }}
+            >
+              View article in store
+            </Link>
+          ) : null}
+          <div
+            style={{ fontSize: 13, lineHeight: 1.55, maxHeight: 320, overflow: 'auto' }}
+            dangerouslySetInnerHTML={{ __html: blogArticle.bodyHtml }}
+          />
+        </div>
+      ) : null}
+
+      {expanded && blogArticle && execution?.status === 'previewed' ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Your deliverable
+          </div>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
+            Proposed article · /blogs/{blogArticle.blogHandle ?? '…'}/{blogArticle.handle}
+          </div>
+          <strong style={{ fontSize: 14 }}>{blogArticle.title}</strong>
+          <div
+            style={{ fontSize: 13, lineHeight: 1.55, maxHeight: 320, overflow: 'auto' }}
+            dangerouslySetInnerHTML={{ __html: blogArticle.bodyHtml }}
+          />
+          <p className="t-dim" style={{ fontSize: 12, margin: 0 }}>
+            Approve to publish this article in Shopify.
+          </p>
+        </div>
+      ) : null}
+
       {expanded && page && execution?.status === 'executed' ? (
         <div style={{ display: 'grid', gap: 10 }}>
           <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
             Your deliverable
           </div>
           <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
-            Created in Shopify · /pages/{page.handle}{page.isPublished ? '' : ' (draft)'}
+            {page.isPublished ? 'Published' : 'Created'} in Shopify · /pages/{page.handle}{page.isPublished ? '' : ' (draft)'}
           </div>
           <strong style={{ fontSize: 14 }}>{page.title}</strong>
+          {page.shopDomain ? (
+            <Link
+              href={`https://${page.shopDomain.replace(/^https?:\/\//, '').replace(/\/$/, '')}/pages/${page.handle}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: 13 }}
+            >
+              {page.isPublished ? 'View page on Shopify' : 'Open page on Shopify'}
+            </Link>
+          ) : null}
           <div
             style={{ fontSize: 13, lineHeight: 1.55, maxHeight: 320, overflow: 'auto' }}
             dangerouslySetInnerHTML={{ __html: page.bodyHtml }}
@@ -457,13 +637,18 @@ export function ActionDeliverableCard({
             Created in Meta Ads · paused — you enable spending when ready
           </div>
           <strong style={{ fontSize: 14 }}>{metaCampaign.campaignName}</strong>
+          {metaCampaign.campaignId ? (
+            <p className="t-mono" style={{ fontSize: 11, margin: 0, color: 'var(--text-mute)' }}>
+              Campaign ID {metaCampaign.campaignId}
+            </p>
+          ) : null}
           <p className="t-dim" style={{ fontSize: 13, margin: 0, lineHeight: 1.55 }}>
             {formatAdBudget(metaCampaign.dailyBudget, metaCampaign.currencyCode)}/day ·{' '}
             {metaCampaign.targeting.countries.join(', ')} · ages {metaCampaign.targeting.ageMin}–
             {metaCampaign.targeting.ageMax}
           </p>
           <Link
-            href={metaAdsConsoleUrl(metaCampaign.adAccountId)}
+            href={metaAdsConsoleUrl(metaCampaign.adAccountId, metaCampaign.campaignId)}
             target="_blank"
             rel="noopener noreferrer"
             className="btn btn-primary"
@@ -480,7 +665,7 @@ export function ActionDeliverableCard({
             Your advert plan
           </div>
           <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
-            Proposed Meta campaign · paused until you approve
+            Agent draft · creatives auto-generated · paused until you enable spend
           </div>
           <strong style={{ fontSize: 14 }}>{metaCampaign.campaignName}</strong>
           <p className="t-dim" style={{ fontSize: 13, margin: 0 }}>
@@ -499,26 +684,108 @@ export function ActionDeliverableCard({
                 borderRadius: 8,
                 background: 'var(--surface-2, rgba(255,255,255,0.03))',
                 fontSize: 13,
+                display: 'grid',
+                gridTemplateColumns: ad.imageUrl ? '88px 1fr' : '1fr',
+                gap: 12,
+                alignItems: 'start',
               }}
             >
-              <div style={{ fontWeight: 600, marginBottom: 8 }}>{ad.name}</div>
-              <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', marginBottom: 4 }}>
-                Primary text
+              {ad.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={ad.imageUrl}
+                  alt={ad.name}
+                  style={{
+                    width: 88,
+                    height: 110,
+                    objectFit: 'cover',
+                    borderRadius: 8,
+                    background: 'var(--surface-2)',
+                  }}
+                  referrerPolicy="no-referrer"
+                />
+              ) : null}
+              <div>
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>{ad.name}</div>
+                {ad.imageSource ? (
+                  <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', marginBottom: 6 }}>
+                    Creative: {ad.imageSource}
+                  </div>
+                ) : null}
+                <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', marginBottom: 4 }}>
+                  Primary text
+                </div>
+                <div style={{ marginBottom: 10, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{ad.primaryText}</div>
+                <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', marginBottom: 4 }}>
+                  Headline · CTA
+                </div>
+                <div style={{ marginBottom: 8 }}>{ad.headline} · {ad.cta.replace(/_/g, ' ')}</div>
+                <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
+                  Landing page
+                </div>
+                <div style={{ fontSize: 12 }}>{ad.finalUrl}</div>
               </div>
-              <div style={{ marginBottom: 10, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{ad.primaryText}</div>
-              <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', marginBottom: 4 }}>
-                Headline · CTA
-              </div>
-              <div style={{ marginBottom: 8 }}>{ad.headline} · {ad.cta.replace(/_/g, ' ')}</div>
-              <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
-                Landing page
-              </div>
-              <div style={{ fontSize: 12 }}>{ad.finalUrl}</div>
             </div>
           ))}
+          {execution?.errorMessage ? (
+            <p className="auth-error" style={{ fontSize: 12, margin: '0 0 8px', lineHeight: 1.5 }}>
+              {execution.errorMessage}
+            </p>
+          ) : null}
           <p className="t-dim" style={{ fontSize: 12, margin: 0, lineHeight: 1.55 }}>
-            Approve creates this campaign <strong>paused</strong> in Meta Ads Manager. Hundres never turns on spend — you review and start it there.
+            Autopilot creates this <strong>paused</strong> in Meta with the images above. Your only job is enable spend in Ads Manager when happy.
           </p>
+        </div>
+      ) : null}
+
+      {expanded && mailchimpSequence ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Email sequence
+          </div>
+          <div className="t-mono" style={{ fontSize: 10, color: 'var(--text-mute)' }}>
+            {execution?.status === 'executed'
+              ? 'Drafts in Mailchimp — review and send there (never auto-sent)'
+              : 'Agent draft · will create Mailchimp drafts (not sent)'}
+          </div>
+          <strong style={{ fontSize: 14 }}>{mailchimpSequence.sequenceName}</strong>
+          <p className="t-dim" style={{ fontSize: 13, margin: 0 }}>
+            From {mailchimpSequence.fromName} · {mailchimpSequence.replyTo}
+            {mailchimpSequence.listName ? ` · ${mailchimpSequence.listName}` : ''}
+          </p>
+          {mailchimpSequence.emails.map((email, i) => (
+            <div
+              key={`${email.dayOffset}-${email.subject}-${i}`}
+              style={{
+                padding: '12px 14px',
+                borderRadius: 8,
+                background: 'var(--surface-2, rgba(255,255,255,0.03))',
+                fontSize: 13,
+              }}
+            >
+              <strong style={{ fontSize: 13 }}>
+                Day {email.dayOffset}: {email.subject}
+              </strong>
+              <p
+                className="t-dim"
+                style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}
+              >
+                {email.bodyPlain.slice(0, 400)}
+                {email.bodyPlain.length > 400 ? '…' : ''}
+              </p>
+            </div>
+          ))}
+          {execution?.status === 'executed' ? (
+            <a
+              href="https://admin.mailchimp.com/campaigns/"
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-ghost"
+              style={{ justifySelf: 'start', textDecoration: 'none' }}
+            >
+              Open Mailchimp campaigns
+            </a>
+          ) : null}
         </div>
       ) : null}
 
@@ -632,7 +899,9 @@ export function ActionDeliverableCard({
             {approving
               ? 'Creating…'
               : metaCampaign
-                ? 'Create paused in Meta Ads'
+                ? 'Create paused in Meta (images ready)'
+                : mailchimpSequence
+                  ? 'Create drafts in Mailchimp'
                 : googleCampaign
                   ? 'Create paused in Google Ads'
                   : page

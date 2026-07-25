@@ -21,7 +21,7 @@ export type AssistDeliverable = {
   reasoning?: string;
   shopifyMcpPrompt?: string;
   proposedImageUrl?: string;
-  imageSource?: 'shopify' | 'unsplash';
+  imageSource?: 'shopify' | 'unsplash' | 'canva' | 'runway' | 'library';
   imageAlt?: string;
   imageAttribution?: string;
   imageRationale?: string;
@@ -36,7 +36,44 @@ export type ShopifyPageState = {
   seoTitle: string;
   seoDescription: string;
   isPublished: boolean;
+  shopDomain?: string;
   shopifyMcpPrompt?: string;
+  reasoning?: string;
+};
+
+export type ShopifyBlogArticleState = {
+  kind: 'shopify_blog_article';
+  articleId: string | null;
+  blogId: string | null;
+  blogHandle: string | null;
+  title: string;
+  handle: string;
+  bodyHtml: string;
+  seoTitle: string;
+  seoDescription: string;
+  summaryHtml?: string;
+  tags?: string[];
+  isPublished: boolean;
+  shopDomain?: string;
+  reasoning?: string;
+};
+
+export type InstagramPublishState = {
+  kind: 'instagram_publish';
+  mediaType?: 'photo' | 'carousel' | 'story' | 'reel';
+  caption: string;
+  imageUrl: string;
+  imageUrls?: string[];
+  slideCount?: number;
+  imageSource: 'shopify' | 'unsplash' | 'canva' | 'runway' | 'library';
+  imageAttribution?: string;
+  imageRationale?: string;
+  canvaDesignId?: string;
+  canvaEditUrl?: string;
+  runwayTaskId?: string;
+  videoUrl?: string;
+  mediaId?: string | null;
+  permalink?: string | null;
   reasoning?: string;
 };
 
@@ -70,6 +107,10 @@ export type MetaAdsCreativeProposal = {
   description?: string;
   cta: string;
   finalUrl: string;
+  imageBrief?: string | null;
+  imageUrl?: string | null;
+  imageSource?: string | null;
+  imageHash?: string | null;
 };
 
 export type MetaAdsCampaignState = {
@@ -93,11 +134,42 @@ export type MetaAdsCampaignState = {
   status: 'draft_proposal' | 'created_paused';
 };
 
+export type MailchimpSequenceEmail = {
+  dayOffset: number;
+  subject: string;
+  previewText?: string;
+  bodyPlain: string;
+  title?: string;
+};
+
+export type MailchimpSequenceState = {
+  kind: 'mailchimp_sequence';
+  sequenceName: string;
+  audienceName?: string;
+  fromName: string;
+  replyTo: string;
+  emails: MailchimpSequenceEmail[];
+  reasoning?: string;
+  listId?: string | null;
+  listName?: string | null;
+  createdCampaigns?: Array<{
+    campaignId: string;
+    webId: number;
+    subject: string;
+    dayOffset: number;
+    archiveUrl?: string;
+  }>;
+  status: 'draft_proposal' | 'drafts_created';
+};
+
 export type ExecutionPayload =
   | ProductSeoState
   | ShopifyPageState
+  | ShopifyBlogArticleState
+  | InstagramPublishState
   | GoogleAdsCampaignState
   | MetaAdsCampaignState
+  | MailchimpSequenceState
   | AssistDeliverable;
 
 export type ExecutionStatus =
@@ -112,12 +184,17 @@ export type ExecutionRecord = {
   organizationId: string;
   strategyId: string;
   actionId: string;
-  platform: 'shopify' | 'google_ads' | 'meta_ads' | 'hundres';
+  platform: 'shopify' | 'google_ads' | 'meta_ads' | 'instagram' | 'mailchimp' | 'hundres';
   executionType:
     | 'update_product_seo'
     | 'create_shopify_page'
+    | 'create_shopify_blog_article'
     | 'create_google_ads_campaign'
     | 'create_meta_ads_campaign'
+    | 'create_mailchimp_drafts'
+    | 'publish_instagram_photo'
+    | 'publish_instagram_story'
+    | 'publish_instagram_reel'
     | 'assist_deliverable';
   status: ExecutionStatus;
   riskLevel: 'low' | 'medium' | 'high';
@@ -156,6 +233,14 @@ export function isShopifyPage(p: ExecutionPayload): p is ShopifyPageState {
   return p.kind === 'shopify_page';
 }
 
+export function isShopifyBlogArticle(p: ExecutionPayload): p is ShopifyBlogArticleState {
+  return p.kind === 'shopify_blog_article';
+}
+
+export function isInstagramPublish(p: ExecutionPayload): p is InstagramPublishState {
+  return p.kind === 'instagram_publish';
+}
+
 export function isProductSeo(p: ExecutionPayload): p is ProductSeoState {
   return p.kind === 'product_seo';
 }
@@ -166,6 +251,10 @@ export function isGoogleAdsCampaign(p: ExecutionPayload): p is GoogleAdsCampaign
 
 export function isMetaAdsCampaign(p: ExecutionPayload): p is MetaAdsCampaignState {
   return p.kind === 'meta_ads_campaign';
+}
+
+export function isMailchimpSequence(p: ExecutionPayload): p is MailchimpSequenceState {
+  return p.kind === 'mailchimp_sequence';
 }
 
 export function formatAdBudget(amount: number, currency: 'GBP' | 'USD' | 'EUR' | string): string {

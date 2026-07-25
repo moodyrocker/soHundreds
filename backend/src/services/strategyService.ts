@@ -6,6 +6,7 @@ import { GoogleAdsSnapshotService } from './googleAdsSnapshotService.js';
 import { GoogleAnalyticsSnapshotService } from './googleAnalyticsSnapshotService.js';
 import { MetaAdsSnapshotService } from './metaAdsSnapshotService.js';
 import { ShopifySnapshotService } from './shopifySnapshotService.js';
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import { MCPConnectionService } from './mcpConnectionService.js';
 import {
   getBusinessProfile,
@@ -15,10 +16,18 @@ import { countPlanActions } from '../utils/parsePlanJson.js';
 import { sanitizeModelStrings, stripWebSearchCitations } from '../utils/stripModelMarkup.js';
 import { MarketIntelService } from './marketIntel/marketIntelService.js';
 import { AuditLogService } from './auditLogService.js';
-import { getAutopilotMode } from './autopilotService.js';
+import { getAutopilotMode, getAutopilotPace } from './autopilotService.js';
 import { ExecutionService } from './executionService.js';
+import { ExecutionOrchestratorService } from './executionOrchestratorService.js';
+import { filterPlanByIntegrations, stripUnsupportedPlatformsFromPlan } from './integrationPlanFilter.js';
+import { LearningKnowledgeService } from './learningKnowledgeService.js';
+import { AutopilotActivityService } from './autopilotActivityService.js';
 import { GoalProgressService } from './goalProgressService.js';
 import { WeekOutcomeService } from './weekOutcomeService.js';
+import {
+  evaluateMetaAdsCreateThrottle,
+  formatMetaAdsThrottleForPrompt,
+} from '../lib/paidAdThrottle.js';
 import { listLoadedSources, runPlanWorkers } from '../workers/runWorkers.js';
 
 export type StrategyDataSource =
@@ -47,6 +56,8 @@ export interface StrategyRecord {
   refinementNotes: string | null;
   currentWeek: number;
   goalStatus: GoalStatus;
+  pauseUntil: string | null;
+  nextBatchReasoning: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -65,6 +76,8 @@ type StrategyRow = {
   refinement_notes: string | null;
   current_week: number;
   goal_status: GoalStatus;
+  pause_until: Date | null;
+  next_batch_reasoning: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -72,7 +85,8 @@ type StrategyRow = {
 const runningJobs = new Set<string>();
 
 function mapRow(row: StrategyRow): StrategyRecord {
-  const plan = row.plan_json ? sanitizeModelStrings(row.plan_json) : null;
+  const rawPlan = row.plan_json ? sanitizeModelStrings(row.plan_json) : null;
+  const plan = rawPlan ? stripUnsupportedPlatformsFromPlan(rawPlan) : null;
   return {
     id: row.id,
     organizationId: row.organization_id,
@@ -90,6 +104,8 @@ function mapRow(row: StrategyRow): StrategyRecord {
       : null,
     currentWeek: row.current_week ?? 1,
     goalStatus: row.goal_status ?? 'active',
+    pauseUntil: row.pause_until?.toISOString() ?? null,
+    nextBatchReasoning: row.next_batch_reasoning ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -156,7 +172,8 @@ export class StrategyService {
     const meta = connections.find((c) => c.platform === 'meta_ads');
     const shopify = connections.find((c) => c.platform === 'shopify');
     const hasProperty = Boolean(analytics?.propertyId);
-    const hasAdsCustomer = Boolean(ads?.config?.customerId);
+    const hasAdsCustomer =
+      isGoogleAdsEnabled() && Boolean(ads?.config?.customerId);
     const hasMetaAccount = Boolean(meta?.config?.adAccountId);
     const hasShop = Boolean(shopify?.config?.shopDomain);
 
@@ -329,13 +346,36 @@ export class StrategyService {
       const workerReports = await runPlanWorkers(workerCtx);
       const sourcesLoaded = listLoadedSources(workerCtx);
 
-      const plan = await this.claude.generatePlanDocument(
+      const learning = new LearningKnowledgeService();
+      const learningCtx = await learning.getPatternsForPlanning(organizationId);
+      const metaThrottle = await evaluateMetaAdsCreateThrottle(organizationId);
+      const paidGateSection = formatMetaAdsThrottleForPrompt(metaThrottle);
+      const learningSection = [learningCtx.promptSection, paidGateSection]
+        .filter(Boolean)
+        .join('\n');
+
+      const pace = await getAutopilotPace(organizationId);
+      let plan = await this.claude.generatePlanDocument(
         enrichedRequest,
         ctx,
         intelSection,
         enrichedRequest.refinementNotes,
-        workerReports
+        workerReports,
+        learningSection || undefined,
+        pace
       );
+
+      if (learningCtx.applied.length && plan.weeks[0]) {
+        plan = {
+          ...plan,
+          weeks: plan.weeks.map((w, i) =>
+            i === 0 ? { ...w, learningApplied: learningCtx.applied } : w
+          ),
+        };
+      }
+
+      const integrations = await new ExecutionService().getIntegrationFlagsPublic(organizationId);
+      plan = filterPlanByIntegrations(plan, integrations).plan;
 
       const metaRow = await query<{ parent_strategy_id: string | null }>(
         `SELECT parent_strategy_id FROM strategies WHERE id = $1 AND organization_id = $2`,
@@ -376,6 +416,21 @@ export class StrategyService {
 
       console.log(`[strategy] generate ok id=${strategyId} org=${organizationId}`);
 
+      if (learningCtx.applied.length) {
+        const activity = new AutopilotActivityService();
+        await activity.log({
+          organizationId,
+          strategyId,
+          weekNumber: 1,
+          step: 'learning_applied',
+          title: 'Plan informed by historical learning',
+          detail: learningCtx.applied
+            .map((p) => `${p.pattern} (${p.sampleSize} prior actions, ${Math.round(p.confidence * 100)}% confidence)`)
+            .join(' · '),
+          status: 'info',
+        });
+      }
+
       void this.runAutopilotCurrentWeek(organizationId, strategyId);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Plan generation failed';
@@ -404,19 +459,17 @@ export class StrategyService {
       if (!strategy || strategy.goalStatus !== 'active') return;
 
       const week = strategy.currentWeek;
-      const mode = await getAutopilotMode(organizationId);
       const execution = new ExecutionService();
-      console.log(`[autopilot] preparing week ${week} strategy=${strategyId} mode=${mode}`);
-      const response = await execution.runWeekAutopilot(
-        organizationId,
-        strategyId,
-        week,
-        mode === 'hands_off',
-        true
-      );
-      const prepared = response.results?.filter((r) => r.ok).length ?? 0;
+      const orchestrator = new ExecutionOrchestratorService();
+      console.log(`[autopilot] sequential week ${week} strategy=${strategyId}`);
+
+      // Preflight only — live data pull + reasoning, no parallel execution.
+      await execution.runWeekAutopilot(organizationId, strategyId, week, false, false);
+
+      const snapshot = await orchestrator.runUntilBlocked(organizationId, strategyId, week);
+      const confirmed = snapshot.actions.filter((a) => a.runStatus === 'confirmed').length;
       console.log(
-        `[autopilot] week ${week} prepared strategy=${strategyId} actions=${prepared} loaded=${response.preflight.snapshots.filter((s) => s.loaded).length}`
+        `[autopilot] week ${week} sequential strategy=${strategyId} confirmed=${confirmed}/${snapshot.actions.length} block=${snapshot.block?.status ?? 'idle'}`
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Autopilot failed';
@@ -456,7 +509,8 @@ export class StrategyService {
       organizationId,
       strategy.plan,
       strategy.plan.summary.goalLine,
-      priorBaseline
+      priorBaseline,
+      strategyId
     );
 
     await this.auditLog.recordGoalEvent({
@@ -549,7 +603,7 @@ export class StrategyService {
 
     if (hasNext) {
       await query(
-        `UPDATE strategies SET current_week = $2, updated_at = NOW() WHERE id = $1 AND organization_id = $3`,
+        `UPDATE strategies SET current_week = $2, pause_until = NULL, next_batch_reasoning = NULL, updated_at = NOW() WHERE id = $1 AND organization_id = $3`,
         [strategyId, nextWeek, organizationId]
       );
       await this.runAutopilotCurrentWeek(organizationId, strategyId);
@@ -595,7 +649,7 @@ export class StrategyService {
 
     if (hasNext) {
       await query(
-        `UPDATE strategies SET current_week = $2, updated_at = NOW() WHERE id = $1 AND organization_id = $3`,
+        `UPDATE strategies SET current_week = $2, pause_until = NULL, next_batch_reasoning = NULL, updated_at = NOW() WHERE id = $1 AND organization_id = $3`,
         [strategyId, nextWeek, organizationId]
       );
       void this.runAutopilotCurrentWeek(organizationId, strategyId);
@@ -631,12 +685,42 @@ export class StrategyService {
       const priorOutcomes = await this.weekOutcomes.listForStrategy(strategyId);
       const outcomeContext = this.weekOutcomes.formatForPrompt(priorOutcomes);
 
+      const priorWeek = nextWeek - 1;
+      const checkpointRow = await query<{ checkpoint_reasoning: string | null }>(
+        `SELECT checkpoint_reasoning FROM block_run_states
+         WHERE strategy_id = $1 AND week_number = $2 AND checkpoint_reasoning IS NOT NULL`,
+        [strategyId, priorWeek]
+      );
+      const checkpointReasoning = checkpointRow.rows[0]?.checkpoint_reasoning?.trim();
+      const replanContext = [
+        outcomeContext,
+        checkpointReasoning
+          ? `CHECKPOINT ANALYTICS REASONING (use this to decide next block — explain why in action "why" fields):\n${checkpointReasoning}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+
+      const learning = new LearningKnowledgeService();
+      const goalMetricHint = strategy.plan.summary.goalTarget?.metric ?? strategy.goal;
+      const learningCtx = await learning.getPatternsForPlanning(organizationId, goalMetricHint);
+      const metaThrottle = await evaluateMetaAdsCreateThrottle(organizationId);
+      const learningSection = [
+        learningCtx.promptSection,
+        formatMetaAdsThrottleForPrompt(metaThrottle),
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const pace = await getAutopilotPace(organizationId);
       const result = await this.claude.generateNextPlanWeek(
         enrichedRequest,
         strategy.plan,
         nextWeek,
         ctx,
-        outcomeContext
+        replanContext,
+        learningSection || undefined,
+        pace
       );
 
       if (result.goalMet) {
@@ -653,23 +737,60 @@ export class StrategyService {
         return;
       }
 
+      const integrations = await new ExecutionService().getIntegrationFlagsPublic(organizationId);
+      const { plan: filteredPlan } = filterPlanByIntegrations(
+        { ...strategy.plan, weeks: [result.week] },
+        integrations
+      );
+      let filteredWeek = filteredPlan.weeks[0]!;
+      if (learningCtx.applied.length) {
+        filteredWeek = { ...filteredWeek, learningApplied: learningCtx.applied };
+      }
+
       const updatedPlan: PlanDocument = {
         ...strategy.plan,
         summary: {
           ...strategy.plan.summary,
           weekCount: nextWeek,
+          connectionSuggestions: [
+            ...(strategy.plan.summary.connectionSuggestions ?? []),
+            ...(filteredPlan.summary.connectionSuggestions ?? []),
+          ],
         },
-        weeks: [...strategy.plan.weeks, result.week],
+        weeks: [...strategy.plan.weeks, filteredWeek],
       };
 
       await query(
         `UPDATE strategies SET
            plan_json = $3::jsonb,
            current_week = $4,
+           pause_until = NULL,
+           next_batch_reasoning = $5,
            updated_at = NOW()
          WHERE id = $1 AND organization_id = $2`,
-        [strategyId, organizationId, JSON.stringify(updatedPlan), nextWeek]
+        [
+          strategyId,
+          organizationId,
+          JSON.stringify(updatedPlan),
+          nextWeek,
+          filteredWeek.focus,
+        ]
       );
+
+      if (learningCtx.applied.length) {
+        const activity = new AutopilotActivityService();
+        await activity.log({
+          organizationId,
+          strategyId,
+          weekNumber: nextWeek,
+          step: 'learning_applied',
+          title: `Week ${nextWeek} plan informed by historical learning`,
+          detail: learningCtx.applied
+            .map((p) => `${p.pattern} (${p.sampleSize} prior actions)`)
+            .join(' · '),
+          status: 'info',
+        });
+      }
 
       console.log(`[strategy] appended week ${nextWeek} strategy=${strategyId}`);
       await this.runAutopilotCurrentWeek(organizationId, strategyId);

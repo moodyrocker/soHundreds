@@ -17,12 +17,20 @@ const adSchema = z.object({
   description: z.string().optional(),
   cta: z.enum(['SHOP_NOW', 'LEARN_MORE', 'SIGN_UP', 'ORDER_NOW']).default('SHOP_NOW'),
   finalUrl: z.string().min(1),
+  imageBrief: z.string().optional(),
 });
 
 const campaignSchema = z.object({
   campaignName: z.string().min(1),
   dailyBudget: z.preprocess(
-    (v) => (typeof v === 'string' ? Number(v.replace(/[^0-9.]/g, '')) : v),
+    (v) => {
+      const num = typeof v === 'string' ? Number(v.replace(/[^0-9.]/g, '')) : v;
+      // The model occasionally emits 0/empty for later weeks; floor to a safe minimum
+      // rather than hard-failing the whole action. Campaign is created paused, so the
+      // user reviews and sets the real budget before enabling spend.
+      if (typeof num !== 'number' || !Number.isFinite(num) || num <= 0) return 1;
+      return num;
+    },
     z.number().positive().max(10_000)
   ),
   currencyCode: z.enum(['GBP', 'USD', 'EUR']).default('GBP'),
@@ -67,6 +75,7 @@ export function parseMetaAdsCampaignJson(text: string): MetaAdsCampaignState {
       description: ad.description?.trim(),
       cta: ad.cta,
       finalUrl: normalizeUrl(ad.finalUrl),
+      imageBrief: ad.imageBrief?.trim() || null,
     })),
     reasoning: clean.reasoning,
     campaignId: null,

@@ -1,3 +1,4 @@
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import { MCPConnectionService } from './mcpConnectionService.js';
 import type { SnapshotFetchResult, SnapshotProbeResult } from '../types/snapshot.js';
 import { idleProbe, probeFromFetch } from '../types/snapshot.js';
@@ -44,6 +45,14 @@ export class GoogleAdsSnapshotService {
   async fetchSnapshotResult(
     organizationId: string
   ): Promise<SnapshotFetchResult<GoogleAdsSnapshot>> {
+    if (!isGoogleAdsEnabled()) {
+      return {
+        ok: false,
+        error: 'Google Ads disabled',
+        errorCode: 'DISABLED',
+        userMessage: 'Google Ads is not enabled — use Meta Ads for paid campaigns.',
+      };
+    }
     const devToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim();
     if (!devToken) {
       return {

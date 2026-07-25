@@ -19,7 +19,15 @@ export interface PlanWeek {
   dates: string;
   focus: string;
   actions: PlanAction[];
+  learningApplied?: LearningPatternApplied[];
 }
+
+export type LearningPatternApplied = {
+  patternKey: string;
+  pattern: string;
+  confidence: number;
+  sampleSize: number;
+};
 
 export type GoalTarget = {
   metric: string;
@@ -41,6 +49,7 @@ export interface PlanSummary {
   confidence: 'high' | 'medium' | 'low';
   weekCount: number;
   goalTarget?: GoalTarget;
+  connectionSuggestions?: string[];
 }
 
 export interface MarketIntelBlock {
@@ -84,6 +93,8 @@ export interface StrategyRecord {
   refinementNotes: string | null;
   currentWeek: number;
   goalStatus: GoalStatus;
+  pauseUntil: string | null;
+  nextBatchReasoning: string | null;
   createdAt: string;
   updatedAt: string;
 }

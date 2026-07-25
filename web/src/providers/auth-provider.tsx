@@ -173,9 +173,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = client.auth.onAuthStateChange((event) => {
-      // TOKEN_REFRESHED fires often; re-fetching /me was clearing accessToken and bouncing to /login.
-      if (event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED') return;
+    } = client.auth.onAuthStateChange((event, session) => {
+      // Keep React accessToken in sync on refresh without a full /me round-trip
+      // (full refreshMe on TOKEN_REFRESHED used to bounce users to /login).
+      if (event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') {
+        if (session?.access_token) setAccessToken(session.access_token);
+        return;
+      }
       void refreshMe();
     });
 

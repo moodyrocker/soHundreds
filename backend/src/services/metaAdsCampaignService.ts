@@ -45,8 +45,60 @@ function budgetMinorUnits(amount: number): string {
 }
 
 /**
+ * Fetch a public HTTPS image and upload it to the ad account as an Ad Image.
+ * Returns Meta image_hash for link_data creatives.
+ */
+async function uploadAdImageHash(
+  adAccountId: string,
+  accessToken: string,
+  imageUrl: string
+): Promise<string> {
+  if (!imageUrl.startsWith('https://')) {
+    throw new Error('Creative image URL must use HTTPS');
+  }
+
+  const imageRes = await fetch(imageUrl, {
+    headers: { 'User-Agent': 'HundresMetaAds/1.0' },
+  });
+  if (!imageRes.ok) {
+    throw new Error(`Could not download creative image (${imageRes.status})`);
+  }
+  const buffer = Buffer.from(await imageRes.arrayBuffer());
+  if (buffer.byteLength < 500) {
+    throw new Error('Creative image is too small or empty');
+  }
+  if (buffer.byteLength > 30 * 1024 * 1024) {
+    throw new Error('Creative image is too large for Meta upload (max 30MB)');
+  }
+
+  const contentType = imageRes.headers.get('content-type') || 'image/jpeg';
+  const ext = contentType.includes('png')
+    ? 'png'
+    : contentType.includes('webp')
+      ? 'webp'
+      : 'jpg';
+  const filename = `hundres-creative.${ext}`;
+  const bytes = buffer.toString('base64');
+
+  const data = await graphPost(`${adAccountId}/adimages`, accessToken, {
+    bytes,
+    name: filename,
+  });
+
+  const images = data.images as Record<string, { hash?: string }> | undefined;
+  if (images) {
+    const first = Object.values(images)[0];
+    if (first?.hash) return first.hash;
+  }
+  if (typeof data.hash === 'string' && data.hash) return data.hash;
+
+  throw new Error('Meta did not return an image hash for the creative');
+}
+
+/**
  * Creates a Meta (Facebook/Instagram) campaign as PAUSED — user enables in Ads Manager.
  * Requires ads_management OAuth scope and a Facebook Page linked to the user.
+ * When ads include imageUrl, uploads to Meta and attaches image_hash on the link creative.
  */
 export class MetaAdsCampaignService {
   private mcp = new MCPConnectionService();
@@ -111,17 +163,38 @@ export class MetaAdsCampaignService {
 
     const updatedAds = [];
     for (const adProposal of proposal.ads) {
+      let imageHash = adProposal.imageHash?.trim() || null;
+      if (!imageHash && adProposal.imageUrl?.startsWith('https://')) {
+        try {
+          imageHash = await uploadAdImageHash(
+            adAccountId,
+            ctx.accessToken,
+            adProposal.imageUrl
+          );
+        } catch (err) {
+          console.warn(
+            '[meta-ads-campaign] image upload failed, creating link creative without hash:',
+            err instanceof Error ? err.message : err
+          );
+        }
+      }
+
+      const linkData: Record<string, unknown> = {
+        link: adProposal.finalUrl,
+        message: adProposal.primaryText,
+        name: adProposal.headline,
+        description: adProposal.description ?? '',
+        call_to_action: { type: adProposal.cta, value: { link: adProposal.finalUrl } },
+      };
+      if (imageHash) {
+        linkData.image_hash = imageHash;
+      }
+
       const creative = await graphPost(`${adAccountId}/adcreatives`, ctx.accessToken, {
         name: `${adProposal.name} · Creative`,
         object_story_spec: JSON.stringify({
           page_id: pageId,
-          link_data: {
-            link: adProposal.finalUrl,
-            message: adProposal.primaryText,
-            name: adProposal.headline,
-            description: adProposal.description ?? '',
-            call_to_action: { type: adProposal.cta, value: { link: adProposal.finalUrl } },
-          },
+          link_data: linkData,
         }),
       });
 
@@ -136,6 +209,7 @@ export class MetaAdsCampaignService {
 
       updatedAds.push({
         ...adProposal,
+        imageHash,
         adId: String(ad.id ?? ''),
         creativeId,
       });

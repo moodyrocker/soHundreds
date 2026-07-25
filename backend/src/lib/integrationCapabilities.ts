@@ -3,11 +3,14 @@ import { getMcpDefinition, type McpTier } from './mcpRegistry.js';
 import {
   isGoogleAdsConfigured,
   isGoogleOAuthConfigured,
+  isCanvaConnectConfigured,
   isInstagramBusinessLoginConfigured,
   isMetaOAuthConfigured,
   isShopifyConfigured,
   isUnsplashMcpConfigured,
+  isRunwayMcpConfigured,
 } from '../services/mcpConnectionService.js';
+import { isGoogleAdsEnabled } from './googleFeatureFlags.js';
 
 export type IntegrationCapability = {
   id: string;
@@ -56,12 +59,14 @@ export function getIntegrationCapabilities(): IntegrationCapability[] {
       id: 'google_ads',
       platform: 'google_ads',
       name: 'Google Ads',
-      implemented: isGoogleAdsConfigured(),
+      implemented: isGoogleAdsEnabled() && isGoogleAdsConfigured(),
       oauthConfigured: googleOAuth,
-      uiStatus: isGoogleAdsConfigured() ? 'available' : 'coming_soon',
-      userMessage: isGoogleAdsConfigured()
-        ? undefined
-        : 'Google Ads is not available on your workspace yet. Contact support to enable it.',
+      uiStatus: isGoogleAdsEnabled() && isGoogleAdsConfigured() ? 'available' : 'coming_soon',
+      userMessage: !isGoogleAdsEnabled()
+        ? 'Google Ads is not enabled yet — use Meta Ads for paid campaigns. Set GOOGLE_ADS_ENABLED=true when ready.'
+        : isGoogleAdsConfigured()
+          ? undefined
+          : 'Google Ads is not available on your workspace yet. Contact support to enable it.',
     }),
     withMcpMeta('meta_ads', {
       id: 'meta_ads',
@@ -96,6 +101,28 @@ export function getIntegrationCapabilities(): IntegrationCapability[] {
         ? undefined
         : 'Unsplash MCP requires UNSPLASH_ACCESS_KEY on the server. Get a free key at unsplash.com/developers.',
     }),
+    withMcpMeta('canva', {
+      id: 'canva',
+      platform: 'canva',
+      name: 'Canva',
+      implemented: isCanvaConnectConfigured(),
+      oauthConfigured: isCanvaConnectConfigured(),
+      uiStatus: isCanvaConnectConfigured() ? 'available' : 'coming_soon',
+      userMessage: isCanvaConnectConfigured()
+        ? undefined
+        : 'Canva requires CANVA_CLIENT_ID and CANVA_CLIENT_SECRET from canva.dev — create a Connect integration and add redirect URI.',
+    }),
+    withMcpMeta('runway', {
+      id: 'runway',
+      platform: 'runway',
+      name: 'Runway',
+      implemented: isRunwayMcpConfigured(),
+      oauthConfigured: false,
+      uiStatus: isRunwayMcpConfigured() ? 'available' : 'coming_soon',
+      userMessage: isRunwayMcpConfigured()
+        ? undefined
+        : 'Runway MCP requires RUNWAY_API_KEY on the server. Get a key at https://dev.runwayml.com/ (API credits are separate from the Runway app).',
+    }),
     withMcpMeta('instagram', {
       id: 'instagram',
       platform: 'instagram',
@@ -106,6 +133,15 @@ export function getIntegrationCapabilities(): IntegrationCapability[] {
       userMessage: isInstagramBusinessLoginConfigured()
         ? undefined
         : 'Instagram Business Login requires INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET (from Instagram → API setup with Instagram login) plus redirect URI on the server.',
+    }),
+    withMcpMeta('mailchimp', {
+      id: 'mailchimp',
+      platform: 'mailchimp',
+      name: 'Mailchimp',
+      implemented: true,
+      oauthConfigured: false,
+      uiStatus: 'available',
+      userMessage: undefined,
     }),
     {
       id: 'meta_ad_library',

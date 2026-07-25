@@ -87,7 +87,10 @@ export function mcpBridgePublicUrl(platform: McpBridgePlatform): string {
     meta_ads: process.env.META_ADS_MCP_PUBLIC_URL,
     shopify: process.env.SHOPIFY_MCP_PUBLIC_URL,
     unsplash: process.env.UNSPLASH_MCP_PUBLIC_URL,
+    canva: process.env.CANVA_MCP_PUBLIC_URL,
+    runway: process.env.RUNWAY_MCP_PUBLIC_URL,
     instagram: process.env.INSTAGRAM_MCP_PUBLIC_URL,
+    mailchimp: process.env.MAILCHIMP_MCP_PUBLIC_URL,
   };
   const explicit = envOverrides[platform]?.trim();
   if (explicit) return explicit.replace(/\/$/, '');
@@ -98,7 +101,10 @@ export function mcpBridgePublicUrl(platform: McpBridgePlatform): string {
     meta_ads: '/mcp/meta-ads',
     shopify: '/mcp/shopify',
     unsplash: '/mcp/unsplash',
+    canva: '/mcp/canva',
+    runway: '/mcp/runway',
     instagram: '/mcp/instagram',
+    mailchimp: '/mcp/mailchimp',
   };
   return `${deploymentOrigin()}${pathByPlatform[platform]}`;
 }

@@ -7,6 +7,8 @@ import {
   mcpPlatformsByPriority,
 } from '../lib/mcpRegistry.js';
 import { isUnsplashConfigured } from '../lib/unsplashClient.js';
+import { isRunwayConfigured } from '../lib/runwayClient.js';
+import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import { MCPConnectionService, isConnectionReady } from './mcpConnectionService.js';
 
 const MCP_BETA = 'mcp-client-2025-11-20';
@@ -35,12 +37,19 @@ export class McpOrchestrationService {
     for (const row of rows) {
       const def = getMcpDefinition(row.platform);
       if (!def) continue;
+      if (row.platform === 'google_ads' && !isGoogleAdsEnabled()) continue;
       if (isConnectionReady(row.platform, row)) {
         ready.push(row.platform);
       }
     }
     if (isUnsplashConfigured()) {
       ready.push('unsplash');
+    }
+    if (isRunwayConfigured()) {
+      ready.push('runway');
+    }
+    if (await this.mcp.isCanvaReady(organizationId)) {
+      ready.push('canva');
     }
     if (await this.mcp.isInstagramReady(organizationId)) {
       ready.push('instagram');

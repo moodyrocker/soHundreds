@@ -1,0 +1,32 @@
+# Rsync filter for EC2 deploy — first match wins.
+# Only ship what Docker Compose needs to build/run.
+
+# Build / local junk
+- node_modules/
+- .next/
+- dist/
+- .turbo/
+- coverage/
+- .env
+- .env.*
+- .DS_Store
+- *.log
+- *.md
+- .git/
+- .gitignore
+- .cursor/
+- .vscode/
+- .idea/
+
+# Runtime tree only
++ /docker-compose.yml
++ /backend/
++ /backend/**
++ /web/
++ /web/**
++ /scripts/
++ /scripts/ec2-bootstrap.sh
+- /scripts/**
+
+# Drop everything else at repo root (docs/, UIHundreds/, *.md guides, supabase CLI, etc.)
+- /*

@@ -22,6 +22,16 @@ export const planWeekSchema = z.object({
   dates: z.string().min(1),
   focus: z.string().min(1),
   actions: z.array(planActionSchema).min(1),
+  learningApplied: z
+    .array(
+      z.object({
+        patternKey: z.string(),
+        pattern: z.string(),
+        confidence: z.number(),
+        sampleSize: z.number(),
+      })
+    )
+    .optional(),
 });
 
 /** Claude often returns numeric targets; store as strings for display + parsing. */
@@ -47,6 +57,8 @@ export const planSummarySchema = z.object({
   confidence: z.enum(['high', 'medium', 'low']),
   weekCount: z.number().int().min(1).max(52),
   goalTarget: goalTargetSchema.optional(),
+  /** Integrations to connect for actions the agent cannot run yet (#4). */
+  connectionSuggestions: z.array(z.string()).optional(),
 });
 
 export const marketIntelBlockSchema = z.object({

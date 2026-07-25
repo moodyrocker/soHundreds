@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { ActionCompletionService } from '../services/actionCompletionService.js';
 import { AuditLogService } from '../services/auditLogService.js';
 import { StrategyService } from '../services/strategyService.js';
+import { LearningKnowledgeService } from '../services/learningKnowledgeService.js';
+import { ProgressDashboardService } from '../services/progressDashboardService.js';
 import type { TenantRequest } from '../middleware/tenant.js';
 
 const createSchema = z.object({
@@ -24,6 +26,7 @@ export function createStrategyRouter(): Router {
   const strategyService = new StrategyService();
   const completionService = new ActionCompletionService();
   const auditLogService = new AuditLogService();
+  const progressDashboard = new ProgressDashboardService();
 
   router.post('/create', async (req, res, next) => {
     const tenant = (req as unknown as TenantRequest).tenant;
@@ -100,6 +103,21 @@ export function createStrategyRouter(): Router {
       const limit = Math.min(Number(req.query.limit) || 10, 50);
       const strategies = await strategyService.list(tenant.id, limit);
       res.json({ strategies });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/:id/progress-dashboard', async (req, res, next) => {
+    try {
+      const tenant = (req as unknown as TenantRequest).tenant;
+      const strategy = await strategyService.getById(tenant.id, req.params.id);
+      if (!strategy) {
+        res.status(404).json({ error: 'Plan not found' });
+        return;
+      }
+      const dashboard = await progressDashboard.build(tenant.id);
+      res.json(dashboard);
     } catch (err) {
       next(err);
     }
@@ -247,6 +265,17 @@ export function createStrategyRouter(): Router {
         return;
       }
       res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get('/:id/learning-patterns', async (req, res, next) => {
+    try {
+      const tenant = (req as unknown as TenantRequest).tenant;
+      const learning = new LearningKnowledgeService();
+      const patterns = await learning.listPatterns(tenant.id);
+      res.json({ patterns });
     } catch (err) {
       next(err);
     }

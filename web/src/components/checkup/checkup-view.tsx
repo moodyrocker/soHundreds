@@ -17,6 +17,7 @@ import {
 } from '@/lib/checkup';
 import { dataSourceLabel, type StrategyDataSource } from '@/lib/plan-types';
 import { useAuth } from '@/providers/auth-provider';
+import { formatDateTime } from '@/lib/format-datetime';
 
 function healthChipVariant(
   health: CheckupRecord['report']['overallHealth']
@@ -24,13 +25,6 @@ function healthChipVariant(
   if (health === 'good') return 'success';
   if (health === 'fair' || health === 'weak') return 'warn';
   return 'default';
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
 }
 
 export function CheckupView() {
@@ -154,7 +148,7 @@ export function CheckupView() {
               <Chip variant="accent">
                 {dataSourceLabel(active.dataSource as StrategyDataSource)}
               </Chip>
-              <Chip>{formatDate(active.createdAt)}</Chip>
+              <Chip>{formatDateTime(active.createdAt)}</Chip>
             </div>
             <h2 className="h-md" style={{ marginBottom: 10 }}>
               {report.headline}
@@ -289,7 +283,7 @@ export function CheckupView() {
                 >
                   <div style={{ fontSize: 14, fontWeight: 500 }}>{item.report.headline}</div>
                   <div className="t-mono" style={{ fontSize: 11, color: 'var(--text-mute)', marginTop: 4 }}>
-                    {formatDate(item.createdAt)} · {HEALTH_LABELS[item.report.overallHealth]}
+                    {formatDateTime(item.createdAt)} · {HEALTH_LABELS[item.report.overallHealth]}
                   </div>
                 </button>
               </li>

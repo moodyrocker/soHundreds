@@ -1,14 +1,25 @@
 import type { PlanAction } from './plan.js';
 
-export type ExecutionPlatform = 'shopify' | 'google_ads' | 'meta_ads' | 'hundres';
+export type ExecutionPlatform =
+  | 'shopify'
+  | 'google_ads'
+  | 'meta_ads'
+  | 'instagram'
+  | 'mailchimp'
+  | 'hundres';
 
 export type ExecutionMode = 'automated_write' | 'assist';
 
 export type ExecutionType =
   | 'update_product_seo'
   | 'create_shopify_page'
+  | 'create_shopify_blog_article'
   | 'create_google_ads_campaign'
   | 'create_meta_ads_campaign'
+  | 'create_mailchimp_drafts'
+  | 'publish_instagram_photo'
+  | 'publish_instagram_story'
+  | 'publish_instagram_reel'
   | 'assist_deliverable';
 
 export type ExecutionStatus =
@@ -43,10 +54,47 @@ export interface AssistDeliverable {
   shopifyMcpPrompt?: string;
   /** Instagram assist preview — optional proposed image (manual post only). */
   proposedImageUrl?: string;
-  imageSource?: 'shopify' | 'unsplash';
+  imageSource?: 'shopify' | 'unsplash' | 'canva' | 'runway' | 'library';
   imageAlt?: string;
   imageAttribution?: string;
   imageRationale?: string;
+}
+
+export interface InstagramPublishState {
+  kind: 'instagram_publish';
+  mediaType?: 'photo' | 'carousel' | 'story' | 'reel';
+  caption: string;
+  imageUrl: string;
+  imageUrls?: string[];
+  slideCount?: number;
+  imageSource: 'shopify' | 'unsplash' | 'canva' | 'runway' | 'library';
+  imageAttribution?: string;
+  /** Why this image was chosen — includes Canva design notes when applicable */
+  imageRationale?: string;
+  canvaDesignId?: string;
+  canvaEditUrl?: string;
+  runwayTaskId?: string;
+  videoUrl?: string;
+  mediaId?: string | null;
+  permalink?: string | null;
+  reasoning?: string;
+}
+
+export interface ShopifyBlogArticleState {
+  kind: 'shopify_blog_article';
+  articleId: string | null;
+  blogId: string | null;
+  blogHandle: string | null;
+  title: string;
+  handle: string;
+  bodyHtml: string;
+  seoTitle: string;
+  seoDescription: string;
+  summaryHtml?: string;
+  tags?: string[];
+  isPublished: boolean;
+  shopDomain?: string;
+  reasoning?: string;
 }
 
 export interface ShopifyPageState {
@@ -58,6 +106,7 @@ export interface ShopifyPageState {
   seoTitle: string;
   seoDescription: string;
   isPublished: boolean;
+  shopDomain?: string;
   /** Copy-paste prompt for Claude.ai + Shopify MCP when write_content is unavailable. */
   shopifyMcpPrompt?: string;
   /** Why the AI structured the page this way. */
@@ -96,6 +145,12 @@ export interface MetaAdsCreativeProposal {
   description?: string;
   cta: 'SHOP_NOW' | 'LEARN_MORE' | 'SIGN_UP' | 'ORDER_NOW';
   finalUrl: string;
+  /** Agent visual direction for auto image generation */
+  imageBrief?: string | null;
+  /** HTTPS creative image — uploaded to Meta as image_hash when present */
+  imageUrl?: string | null;
+  imageSource?: string | null;
+  imageHash?: string | null;
   adId?: string | null;
   creativeId?: string | null;
 }
@@ -121,11 +176,43 @@ export interface MetaAdsCampaignState {
   status: 'draft_proposal' | 'created_paused';
 }
 
+export interface MailchimpSequenceEmail {
+  dayOffset: number;
+  subject: string;
+  previewText?: string;
+  bodyPlain: string;
+  title?: string;
+}
+
+export interface MailchimpSequenceState {
+  kind: 'mailchimp_sequence';
+  sequenceName: string;
+  audienceName?: string;
+  fromName: string;
+  replyTo: string;
+  emails: MailchimpSequenceEmail[];
+  reasoning?: string;
+  listId?: string | null;
+  listName?: string | null;
+  createdCampaigns?: Array<{
+    campaignId: string;
+    webId: number;
+    subject: string;
+    dayOffset: number;
+    archiveUrl?: string;
+  }>;
+  /** Drafts only — never auto-sent */
+  status: 'draft_proposal' | 'drafts_created';
+}
+
 export type ExecutionPayload =
   | ProductSeoState
   | ShopifyPageState
+  | ShopifyBlogArticleState
   | GoogleAdsCampaignState
   | MetaAdsCampaignState
+  | MailchimpSequenceState
+  | InstagramPublishState
   | AssistDeliverable;
 
 export interface ExecutionRoute {

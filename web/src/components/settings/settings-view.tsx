@@ -10,10 +10,8 @@ import { createOrganization, deleteOrganization } from '@/lib/organizations';
 import { dataSourceLabel, type StrategyRecord } from '@/lib/plan-types';
 import { deleteStrategy, listStrategies } from '@/lib/strategy';
 import { useAuth } from '@/providers/auth-provider';
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-}
+import { formatDateTime } from '@/lib/format-datetime';
+import { AutopilotPaceSection } from '@/components/settings/autopilot-pace-section';
 
 function planReviewLink(plan: StrategyRecord): { href: string; title: string } | null {
   if (plan.status === 'generating') {
@@ -132,9 +130,9 @@ export function SettingsView() {
           </div>
           <h1 className="h-display">Settings</h1>
           <p className="t-dim" style={{ fontSize: 17, marginTop: 10, maxWidth: 560 }}>
-            Manage workspaces and plans. Each workspace is created at signup or when you add a new
-            business — that&apos;s why you may see <strong>Switch org</strong> if you have more than
-            one.
+            Manage workspaces, Autopilot pace, and plans. Each workspace is created at signup or when
+            you add a new business — that&apos;s why you may see <strong>Switch org</strong> if you
+            have more than one.
           </p>
         </div>
         <Button variant="ghost" type="button" onClick={() => void signOut()}>
@@ -143,6 +141,8 @@ export function SettingsView() {
       </div>
 
       {error ? <p className="auth-error" style={{ marginBottom: 16 }}>{error}</p> : null}
+
+      <AutopilotPaceSection />
 
       <Card style={{ marginBottom: 24 }}>
         <div className="h-eyebrow" style={{ marginBottom: 12 }}>
@@ -246,7 +246,7 @@ export function SettingsView() {
                   <div style={{ flex: 1, minWidth: 200 }}>
                     <div style={{ fontSize: 14, fontWeight: 500, lineHeight: 1.45 }}>{plan.goal}</div>
                     <div className="t-mono" style={{ fontSize: 11, color: 'var(--text-mute)', marginTop: 6 }}>
-                      {formatDate(plan.createdAt)} · {plan.status} · {dataSourceLabel(plan.dataSource)}
+                      {formatDateTime(plan.createdAt)} · {plan.status} · {dataSourceLabel(plan.dataSource)}
                       {plan.actionCount > 0 ? ` · ${plan.actionCount} actions` : ''}
                     </div>
                     {plan.refinementNotes ? (

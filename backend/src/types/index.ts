@@ -13,7 +13,10 @@ export type MCPPlatform =
   | 'meta_ads'
   | 'shopify'
   | 'unsplash'
-  | 'instagram';
+  | 'canva'
+  | 'runway'
+  | 'instagram'
+  | 'mailchimp';
 
 export interface MCPConnectionConfig {
   customerId?: string;
@@ -27,6 +30,13 @@ export interface MCPConnectionConfig {
   /** instagram_business = Instagram Login; facebook_page = legacy Page-linked token */
   instagramLoginMethod?: 'instagram_business' | 'facebook_page';
   grantedScopes?: string;
+  canvaUserId?: string;
+  canvaDisplayName?: string;
+  /** Mailchimp default audience (list) id */
+  mailchimpListId?: string;
+  mailchimpListName?: string;
+  mailchimpAccountName?: string;
+  mailchimpDatacenter?: string;
 }
 
 export interface MetaAdAccountSummary {

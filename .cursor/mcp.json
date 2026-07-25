@@ -4,6 +4,13 @@
       "type": "url",
       "url": "https://analytics-mcp.googleapis.com/mcp/v1"
     },
+    "canva": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@latest", "https://mcp.canva.com/mcp"]
+    },
+    "runway": {
+      "url": "https://mcp.runwayml.com/mcp"
+    },
     "shopify-dev-mcp": {
       "command": "npx",
       "args": ["-y", "@shopify/dev-mcp@latest"]

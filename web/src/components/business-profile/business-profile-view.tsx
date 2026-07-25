@@ -7,6 +7,7 @@ import { Card } from '@/components/hundres/card';
 import { Chip } from '@/components/hundres/chip';
 import { Icon } from '@/components/hundres/icon';
 import {
+  draftBusinessProfile,
   getBusinessProfile,
   updateBusinessProfile,
   type BusinessProfile,
@@ -81,8 +82,10 @@ export function BusinessProfileView() {
   const [complete, setComplete] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [drafting, setDrafting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [drafted, setDrafted] = useState(false);
 
   const load = useCallback(async () => {
     if (!accessToken || !activeOrganization) return;
@@ -108,7 +111,45 @@ export function BusinessProfileView() {
 
   const setField = (key: keyof FormState, value: string) => {
     setSaved(false);
+    setDrafted(false);
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const writeWithAi = async () => {
+    if (!accessToken || !activeOrganization) return;
+    if (!form.website.trim()) {
+      setError('Add a website URL first — AI uses it to draft your profile.');
+      return;
+    }
+    setDrafting(true);
+    setError(null);
+    setSaved(false);
+    setDrafted(false);
+    try {
+      const { draft } = await draftBusinessProfile(accessToken, activeOrganization.id, {
+        website: form.website,
+        current: {
+          oneLiner: form.oneLiner,
+          audience: form.audience,
+          offer: form.offer,
+          emulate: form.emulate,
+          budget: form.budget,
+        },
+      });
+      setForm((prev) => ({
+        website: draft.website ?? prev.website,
+        oneLiner: draft.oneLiner || prev.oneLiner,
+        audience: draft.audience || prev.audience,
+        offer: draft.offer || prev.offer,
+        emulate: draft.emulate || prev.emulate,
+        budget: draft.budget || prev.budget,
+      }));
+      setDrafted(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'AI draft failed');
+    } finally {
+      setDrafting(false);
+    }
   };
 
   const save = async () => {
@@ -132,6 +173,7 @@ export function BusinessProfileView() {
       setForm(profileToForm(profile));
       setComplete(isComplete);
       setSaved(true);
+      setDrafted(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -156,15 +198,37 @@ export function BusinessProfileView() {
           </div>
           <h1 className="profile-title">Business profile</h1>
           <p className="profile-sub">
-            Tell Hundres what you sell and who you serve. Website, offer, and businesses to emulate
-            power market research in plans (directional, low-confidence intel — not your ad metrics).
+            Tell Hundres what you sell and who you serve. “Businesses to emulate” is for
+            competitor/inspiration research. Image creatives live in the{' '}
+            <Link href="/visuals" style={{ color: 'var(--accent-hover)' }}>
+              Visual library
+            </Link>
+            ; prompt styles live in{' '}
+            <Link href="/runway" style={{ color: 'var(--accent-hover)' }}>
+              Runway
+            </Link>
+            .
           </p>
         </div>
         <div className="profile-actions">
           <Button variant="ghost" type="button" disabled={loading} onClick={() => void load()}>
             Refresh
           </Button>
-          <Button variant="primary" type="button" disabled={loading || saving} onClick={() => void save()}>
+          <Button
+            variant="default"
+            type="button"
+            disabled={loading || drafting || saving}
+            onClick={() => void writeWithAi()}
+          >
+            <Icon name="sparkle" style={{ width: 14, height: 14, marginRight: 6 }} />
+            {drafting ? 'Writing…' : 'Write with AI'}
+          </Button>
+          <Button
+            variant="primary"
+            type="button"
+            disabled={loading || saving || drafting}
+            onClick={() => void save()}
+          >
             {saving ? 'Saving…' : 'Save profile'}
           </Button>
         </div>
@@ -173,6 +237,14 @@ export function BusinessProfileView() {
       {error && (
         <Card style={{ marginBottom: 20, borderColor: 'var(--warn)' }}>
           <p style={{ margin: 0, color: 'var(--warn)' }}>{error}</p>
+        </Card>
+      )}
+
+      {drafted && !error && (
+        <Card style={{ marginBottom: 20 }}>
+          <p className="t-dim" style={{ margin: 0, fontSize: 14 }}>
+            AI draft filled in below — review the copy, edit anything off, then hit Save profile.
+          </p>
         </Card>
       )}
 
@@ -192,7 +264,7 @@ export function BusinessProfileView() {
             <Field
               id="website"
               label="Website"
-              hint="Your main site or store URL"
+              hint="Your main site or store URL — required for Write with AI"
               value={form.website}
               onChange={(v) => setField('website', v)}
               placeholder="https://yourbusiness.com"
@@ -226,7 +298,7 @@ export function BusinessProfileView() {
             <Field
               id="emulate"
               label="Businesses to emulate"
-              hint="Names or URLs of brands you admire in your space — used for directional market research"
+              hint="Brands or competitors you admire — used for directional market research in plans (positioning ideas, not your creatives). Separate from the Visual library."
               value={form.emulate}
               onChange={(v) => setField('emulate', v)}
               placeholder="e.g. Glossier, local competitor on Main St, https://example-brand.com"
@@ -246,7 +318,15 @@ export function BusinessProfileView() {
 
       <p className="profile-footer t-dim">
         <Icon name="info" style={{ width: 12, height: 12, verticalAlign: -2, marginRight: 6 }} />
-        Need to connect data sources?{' '}
+        Image creatives?{' '}
+        <Link href="/visuals" style={{ color: 'var(--accent-hover)' }}>
+          Visual library
+        </Link>{' '}
+        · Prompt styles?{' '}
+        <Link href="/runway" style={{ color: 'var(--accent-hover)' }}>
+          Runway
+        </Link>{' '}
+        · Need to connect data sources?{' '}
         <Link href="/integrations" style={{ color: 'var(--accent-hover)' }}>
           Integrations
         </Link>{' '}

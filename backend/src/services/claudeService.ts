@@ -6,14 +6,25 @@ import type { MarketIntelPromptSection } from '../types/marketIntel.js';
 import type { StrategyRequest } from '../types/index.js';
 import type { WorkerReport } from '../types/workers.js';
 import type { PlanAction } from '../types/plan.js';
-import type { AssistDeliverable, ShopifyPageState, GoogleAdsCampaignState, MetaAdsCampaignState } from '../types/execution.js';
+import type { AssistDeliverable, ShopifyBlogArticleState, ShopifyPageState, GoogleAdsCampaignState, MetaAdsCampaignState, MailchimpSequenceState } from '../types/execution.js';
 import { parseCheckupJson } from '../utils/parseCheckupJson.js';
 import { parseAssistJson } from '../utils/parseAssistJson.js';
 import { parseShopifyPageJson } from '../utils/parseShopifyPageJson.js';
+import { parseShopifyBlogJson } from '../utils/parseShopifyBlogJson.js';
+import {
+  isInstagramAutoPublishEnabled,
+  isShopifyAutoPublishLiveEnabled,
+} from '../lib/contentPublishFeatureFlags.js';
+import { pacePlanPromptNotes, type AutopilotPace } from '../lib/autopilotPaceConfig.js';
+import { supportedChannelsPlanNotes } from '../lib/supportedPlanChannels.js';
 import { parseGoogleAdsCampaignJson } from '../utils/parseGoogleAdsCampaignJson.js';
 import { parseMetaAdsCampaignJson } from '../utils/parseMetaAdsCampaignJson.js';
+import { parseMailchimpSequenceJson } from '../utils/parseMailchimpSequenceJson.js';
 import { extractJsonFromModelText, extractJsonObjectString, normalizePlanDocument } from '../utils/parsePlanJson.js';
+import { parseAgentTaskJson, type ParsedAgentTask } from '../utils/parseAgentTaskJson.js';
+import { randomUUID } from 'node:crypto';
 import { sanitizeModelStrings } from '../utils/stripModelMarkup.js';
+import { fetchWebsiteText } from '../lib/fetchWebsiteText.js';
 
 const DEFAULT_MODEL =
   process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514';
@@ -66,14 +77,18 @@ export class ClaudeService {
     ctx: PlanGenerationContext,
     marketIntel?: MarketIntelPromptSection | null,
     refinementNotes?: string,
-    workerReports?: WorkerReport[]
+    workerReports?: WorkerReport[],
+    learningPromptSection?: string,
+    pace: AutopilotPace = 'normal'
   ): Promise<PlanDocument> {
     const prompt = this.buildPlanJsonPrompt(
       request,
       ctx,
       marketIntel,
       refinementNotes,
-      workerReports
+      workerReports,
+      learningPromptSection,
+      pace
     );
     const useWebSearch = this.shouldUseWebSearch(ctx, marketIntel, refinementNotes);
 
@@ -96,7 +111,9 @@ export class ClaudeService {
     plan: PlanDocument,
     nextWeekNumber: number,
     ctx: PlanGenerationContext,
-    priorOutcomeSummary?: string
+    priorOutcomeSummary?: string,
+    learningPromptSection?: string,
+    pace: AutopilotPace = 'normal'
   ): Promise<NextWeekResult> {
     const priorWeeks = plan.weeks
       .map(
@@ -130,6 +147,9 @@ ${priorOutcomeSummary}
 Use these outcomes to decide what to do next — double down on what moves the target metric.
 
 `;
+    }
+    if (learningPromptSection?.trim()) {
+      prompt += learningPromptSection;
     }
     if (ctx.analyticsSnapshotText) {
       prompt += `--- LATEST ANALYTICS ---\n${ctx.analyticsSnapshotText}\n---\n`;
@@ -167,8 +187,13 @@ OUTPUT: ONLY valid JSON:
 
 Rules:
 - If goalMet is true, set week to null.
-- Otherwise exactly 3–5 actions for week ${nextWeekNumber}; unique ids w${nextWeekNumber}-a{M}.
+- Otherwise schedule actions for week ${nextWeekNumber} per PACE MODE below; unique ids w${nextWeekNumber}-a{M}.
 - Build on prior weeks — do not repeat completed work.
+- INTEGRATION AVAILABILITY: Only include actions executable with connected services (Meta Ads / Google Ads / Shopify / Mailchimp as indicated in snapshot context). Email "sent" outcomes require Mailchimp. Omit disconnected-service tasks; add connect hints to progressNote when relevant.
+${pacePlanPromptNotes(pace)}
+${supportedChannelsPlanNotes()}
+${this.contentPublishPlanNotes()}
+- Include explicit reasoning in each action "why" field — reference metrics from PRIOR WEEK OUTCOMES and CHECKPOINT ANALYTICS when provided.
 - Plain English. No markdown fences.
 `;
 
@@ -374,7 +399,9 @@ Rules:
     ctx: PlanGenerationContext,
     marketIntel?: MarketIntelPromptSection | null,
     refinementNotes?: string,
-    workerReports?: WorkerReport[]
+    workerReports?: WorkerReport[],
+    learningPromptSection?: string,
+    pace: AutopilotPace = 'normal'
   ): string {
     let prompt = `You are a marketing operator. The user has an open-ended business goal — NOT a fixed 8-week project. Your job is to define how success is measured and plan the FIRST WEEK of work toward that goal. Hundres will run new weeks automatically until the goal is met.
 
@@ -487,6 +514,10 @@ ${report.summary}
       }
     }
 
+    if (learningPromptSection?.trim()) {
+      prompt += `\n${learningPromptSection}`;
+    }
+
     prompt += `
 OUTPUT: Respond with ONLY valid JSON (no markdown, no commentary). Schema:
 
@@ -516,7 +547,8 @@ OUTPUT: Respond with ONLY valid JSON (no markdown, no commentary). Schema:
       "baseline": "current estimate from data or reasonable guess",
       "target": "numeric target as a string e.g. \"5000\" or \"+30%\"",
       "unit": "% or £ or orders etc"
-    }
+    },
+    "connectionSuggestions": ["Connect Meta Ads in Integrations to run paid campaigns automatically"]
   },
   "weeks": [
     {
@@ -548,10 +580,20 @@ Rules:
 - Output ONLY week 1 in the weeks array — future weeks are generated later based on progress toward goalTarget.
 - goalTarget is required — define the measurable success condition.
 - summary.weekCount must be 1 for the initial plan.
-- 3–5 actions in week 1; unique ids (w1-a{M}).
+- Schedule week 1 actions per PACE MODE below; unique ids (w1-a{M}).
 - Plain English, no jargon.
 - All JSON string values must be plain text only — no HTML, markdown, or web-search citation tags (never use cite/index markup).
 - Tailor everything to the user's goal and context.
+- INTEGRATION AVAILABILITY (critical): Only schedule actions Hundres can execute with currently connected services.
+  * Meta Ads campaign actions ONLY if Meta Ads is connected above.
+  * Google Ads campaign actions ONLY if Google Ads is connected above.
+  * Shopify page/blog/SEO write actions ONLY if Shopify is connected above.
+  * Email send / mailing-list / win-back sequence actions that claim "sent" or "published" ONLY if Mailchimp is connected above. Without Mailchimp, email actions are copy-only assist deliverables — never claim emails were sent or published.
+  * If a high-value action needs a disconnected integration, do NOT include it as a task — omit it and mention "Connect [service] in Integrations" in summary.connectionSuggestions array (string messages).
+  * Content, SEO guides, and local outreach are always allowed as assist deliverables without integrations. Email copy-only is allowed without Mailchimp; do not phrase outcomes as "Email sequence created and sent".
+${pacePlanPromptNotes(pace)}
+${supportedChannelsPlanNotes()}
+${this.contentPublishPlanNotes()}
 - summary.confidence: "high" only if you used real analytics and/or ads numbers above; "medium" if partial; "low" for generic-only plans.
 - Do not use markdown code fences. Start your reply with { and end with }.
 `;
@@ -730,24 +772,61 @@ Rules: Plain text only. Be specific to the action. All extras values must be pla
     image?: {
       url: string;
       alt: string;
-      source: 'shopify' | 'unsplash';
+      source: 'shopify' | 'unsplash' | 'canva' | 'runway' | 'library';
       attribution?: string;
       rationale: string;
     } | null;
+    images?: Array<{
+      url: string;
+      alt: string;
+      source: 'shopify' | 'unsplash' | 'canva' | 'runway' | 'library';
+      attribution?: string;
+      rationale: string;
+    }>;
+    userInstructions?: string | null;
+    ctaText?: string | null;
+    mediaKind?: 'feed' | 'carousel' | 'story';
   }): Promise<AssistDeliverable> {
     const a = input.action;
-    const imageBlock = input.image
-      ? `
-PROPOSED IMAGE (user will post manually — caption MUST match this image):
-- URL: ${input.image.url}
-- Alt: ${input.image.alt}
-- Source: ${input.image.source}
-${input.image.attribution ? `- Attribution: ${input.image.attribution}` : ''}
-- Why this image: ${input.image.rationale}
+    const imageList = input.images?.length
+      ? input.images
+      : input.image
+        ? [input.image]
+        : [];
 
-Write a caption whose hook and body clearly describe what is in this image. Do not mention unrelated products or generic stock concepts.`
-      : `
+    const imageBlock =
+      imageList.length > 0
+        ? `
+IMAGES FOR THIS POST (${imageList.length > 1 ? 'carousel — caption covers all slides' : 'single photo'}):
+${imageList
+  .map(
+    (img, i) =>
+      `- Slide ${i + 1}: ${img.alt} (${img.source})${img.attribution ? ` · ${img.attribution}` : ''}`
+  )
+  .join('\n')}
+
+Write a caption whose hook and body match these images and the user's topic. Do not mention unrelated products.`
+        : `
 No image was auto-selected — write a caption and note in steps that the user should attach their own product photo.`;
+
+    const instructionsBlock = input.userInstructions?.trim()
+      ? `
+USER'S EXACT INSTRUCTIONS (follow precisely — do not ignore):
+${input.userInstructions.trim()}`
+      : '';
+
+    const ctaBlock = input.ctaText?.trim()
+      ? `
+REQUIRED CTA: The caption MUST end with a clear call-to-action mentioning "${input.ctaText.trim()}" (product name, shop link prompt, or "shop Cream of Dreams" style line). Put the CTA in primaryCopy, not only in extras.`
+      : '';
+
+    const storyBlock =
+      input.mediaKind === 'story'
+        ? `
+This is an Instagram STORY (not a feed post). Stories disappear after 24 hours and cannot have feed captions via API.
+In primaryCopy write a short on-image text suggestion (1–2 lines) the user can add as a sticker in Instagram.
+In pasteInstructions explain: Instagram → Create story → use the proposed image → add text sticker with the suggested copy.`
+        : '';
 
     const prompt = `You prepare Instagram post deliverables for a non-expert founder. Output ONLY valid JSON.
 
@@ -760,17 +839,20 @@ PLAN ACTION:
 - Why: ${a.why}
 - Outcome: ${a.outcome}
 - KPI: ${a.kpi}
+${instructionsBlock}
+${ctaBlock}
+${storyBlock}
 ${imageBlock}
 
-Channel guidance: Write an Instagram caption with hook, body, CTA, and 5-10 hashtags in extras.hashtags. Be specific to the business offer and audience — never generic filler.
+Channel guidance: Write an Instagram caption with hook, body, strong CTA line, and 5-10 hashtags in extras.hashtags. Be specific to the business offer and audience — never generic filler.
 
 Schema:
 {
   "headline": "one line summary of what you prepared",
-  "primaryCopy": "Instagram caption they copy-paste",
+  "primaryCopy": "Instagram caption they copy-paste — MUST include required CTA if specified",
   "steps": ["numbered micro-steps to finish manually in Instagram, max 5"],
-  "extras": { "hashtags": "space-separated hashtags" },
-  "pasteInstructions": "Instagram or Meta Business Suite → Create post → attach the proposed image (or your own product photo) → paste caption",
+  "extras": { "hashtags": "space-separated hashtags", "cta": "the CTA line used" },
+  "pasteInstructions": "Instagram or Meta Business Suite → Create post → attach the proposed image(s) → paste caption",
   "reasoning": "2-3 sentences: why this caption and image approach fits the brand and action"
 }
 
@@ -793,6 +875,18 @@ Rules: Plain text only. All extras values must be plain strings. No markdown fen
         imageAlt: input.image.alt,
         imageAttribution: input.image.attribution,
         imageRationale: input.image.rationale,
+      };
+    }
+
+    if (imageList.length > 0) {
+      const first = imageList[0];
+      return {
+        ...deliverable,
+        proposedImageUrl: first.url,
+        imageSource: first.source,
+        imageAlt: first.alt,
+        imageAttribution: first.attribution,
+        imageRationale: first.rationale,
       };
     }
 
@@ -1016,6 +1110,279 @@ Rules:
     throw lastErr instanceof Error ? lastErr : new Error('Failed to generate Shopify page JSON');
   }
 
+  async generateShopifyBlogArticle(input: {
+    action: PlanAction;
+    goal: string;
+    businessContext?: string | null;
+  }): Promise<ShopifyBlogArticleState> {
+    const a = input.action;
+
+    const prompt = `You write a complete Shopify blog article for a DTC brand. Output ONLY valid JSON.
+
+GOAL: ${input.goal}
+BUSINESS: ${input.businessContext || 'Not provided'}
+
+PLAN ACTION:
+- Title: ${a.title}
+- Channel: ${a.channel}
+- Why: ${a.why}
+- Outcome: ${a.outcome}
+- KPI: ${a.kpi}
+
+Write a complete article (600–900 words) as section paragraphs. Plain text only inside JSON — no raw HTML in strings.
+
+Schema:
+{
+  "title": "article title",
+  "handle": "url-slug-lowercase-hyphens",
+  "sections": [
+    { "heading": "optional H2", "paragraphs": ["paragraph one", "paragraph two"] }
+  ],
+  "seoTitle": "SEO title max 70 chars",
+  "seoDescription": "meta description max 160 chars",
+  "summaryHtml": "one sentence excerpt for blog listing",
+  "tags": ["tag-one", "tag-two"],
+  "reasoning": "2-3 sentences: why this article angle fits the goal and action"
+}
+
+Rules:
+- 4–8 sections, 600–900 words total across paragraphs.
+- Specific to this business and action. handle must be URL-safe (a-z, 0-9, hyphens).
+- tags: 2–5 relevant strings.
+- Escape double quotes inside strings as \\". No trailing commas. No markdown fences. Start with {`;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const message = await this.client.messages.create({
+        model: DEFAULT_MODEL,
+        max_tokens: 8192,
+        messages: [
+          {
+            role: 'user',
+            content:
+              attempt === 0
+                ? prompt
+                : `${prompt}\n\nYour previous reply was invalid JSON. Output ONLY valid JSON.`,
+          },
+        ],
+      });
+
+      const text = this.extractTextContent(message);
+      try {
+        return parseShopifyBlogJson(text);
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          '[claude] shopify blog JSON parse failed:',
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error('Failed to generate Shopify blog JSON');
+  }
+
+  async parseAgentTask(input: {
+    message: string;
+    goal: string;
+    brandProfile?: string | null;
+    businessContext?: string | null;
+    connectedPlatforms: string[];
+    mcpCapabilities?: string;
+    learningKnowledge?: string;
+    contentRecipes?: string;
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  }): Promise<ParsedAgentTask & { actionId: string }> {
+    const connected =
+      input.connectedPlatforms.length > 0
+        ? input.connectedPlatforms.join(', ')
+        : 'none connected yet';
+
+    const historyBlock =
+      input.history && input.history.length > 0
+        ? `\nCONVERSATION SO FAR (oldest first):\n${input.history
+            .map((m) => `${m.role === 'user' ? 'User' : 'Agent'}: ${m.content}`)
+            .join('\n')}\n`
+        : '';
+
+    const brandBlock = (input.brandProfile || input.businessContext || 'Not provided').trim();
+    const mcpBlock = (input.mcpCapabilities || 'No MCP capability notes.').trim();
+    const knowledgeBlock = input.learningKnowledge?.trim()
+      ? `\nWORKSPACE LEARNING (past outcomes — prefer what worked):\n${input.learningKnowledge.trim()}\n`
+      : '';
+    const recipesBlock = input.contentRecipes?.trim()
+      ? `\nSAVED CONTENT RECIPES (reference by recipeSlug — user can say "use recipe <slug>" or the recipe name):\n${input.contentRecipes.trim()}\n`
+      : '';
+
+    const prompt = `You are Hundres, a brand-aware marketing agent for this workspace. Output ONLY valid JSON.
+
+GOAL: ${input.goal}
+
+BRAND PROFILE (use product names, audience, and tone from here — do not ask which product if it is already clear from brand + conversation):
+${brandBlock}
+
+CONNECTED INTEGRATIONS: ${connected}
+
+MCP CAPABILITIES (what you can actually automate now):
+${mcpBlock}
+${knowledgeBlock}${recipesBlock}${historyBlock}
+LATEST USER MESSAGE:
+"${input.message}"
+
+## Continuity (critical)
+- Short follow-ups like "Cream of Dreams — clean lifestyle" CONTINUE the prior request in CONVERSATION SO FAR.
+- Merge history + latest message into one full creative brief. Do NOT ask again for platform/format already stated (e.g. Instagram story, Runway video).
+- If the prior turn asked a clarifying question and the user answered, set supported:true and EXECUTE — do not re-clarify unless a critical detail is still missing.
+- Prefer brand products from BRAND PROFILE / offer when the user names a product (e.g. Cream of Dreams).
+
+## Sentiment (knowledge)
+Analyze sentiment: positive | neutral | negative | frustrated | curious | urgent.
+- positive/curious: warm, concise confirm + run.
+- frustrated/urgent: apologize briefly, skip optional questions, execute ASAP with best defaults.
+- negative: acknowledge concern, offer the smallest next step.
+Always include "sentiment" in the JSON.
+
+## When to clarify vs execute
+- Clear enough with history → supported:true, needsClarification:false, include action + executionBrief, then backend runs immediately.
+- NEVER reply "Got it, I'll create…" without supported:true and a full action block — if you confirm, you must execute.
+- Truly missing critical info (and not in brand/history) → supported:false, needsClarification:true, ask 1 specific question max — do not promise execution in the reply.
+- Off-topic (TikTok, email send, draft a full plan) → supported:false, needsClarification:false, unsupportedReason.
+
+## Supported tasks (when integrations allow)
+- Instagram feed photo/carousel — channel "instagram"
+- Instagram feed AI image via Runway text-to-image (lowest credit ~5) — mediaFormat "feed", recipeSlug "runway-text-to-image" (or omit slug to auto-rotate lifestyle still examples: morning-routine, post-gym, hands-macro, flat-lay, bag-commute, window-light, steam-fresh, shelf-candid, outdoor-day, texture-editorial — slugs runway-ig-still-*)
+- Instagram REEL / UGC / any AI or Runway video to Instagram — title MUST mention "reel", "video", or "UGC"; mediaFormat "reel", videoSource "runway", recipeSlug "runway-product-ugc" for UGC
+  - UGC Instagram requests: ALWAYS supported:true, needsClarification:false — execute immediately using brand profile + Shopify product photo; missing creator photo falls back to Runway product_ad (do NOT ask the user to film)
+- Instagram STORY (image OR AI/video) — title MUST mention "story" or "stories"; mediaFormat "story"
+- AI video via Runway for Reel (default when user says video + Instagram): mediaFormat "reel", videoSource "runway", duration preference lowest credit (5s)
+- AI still via Runway when user asks for text-to-image / AI photo / AI image (not video): mediaFormat "feed", recipeSlug "runway-text-to-image"
+- AI video via Runway for Story only when user says story: mediaFormat "story", videoSource "runway"
+- Saved custom recipes from Business → Content recipes — when user names a recipe or says "use recipe <slug>", set recipeSlug to that exact slug
+- Canva creatives → Instagram stills when Canva connected
+- Shopify blog / page / product SEO
+- Meta or Google paid campaigns only if user explicitly asks for ads/budget
+
+When supported:true, ALWAYS include executionBrief:
+- fullRequest: one paragraph merging conversation + brand (product, vibe, platform, format)
+- ctaText: product name (e.g. "Cream of Dreams")
+- imageSearchQuery: vibe keywords (e.g. "clean lifestyle")
+- mediaFormat: "story" | "reel" | "feed" | "carousel"
+- videoSource: "runway" when generating AI video; omit if still image only
+- recipeSlug: preferred — official (runway-product-ugc | runway-product-ad | runway-product-campaign-image | runway-text-to-video | runway-text-to-image) OR any saved custom slug from SAVED CONTENT RECIPES
+- productImageUrl / characterImageUrl: HTTPS image URLs when user supplies them (UGC needs both). Prefer BRAND VISUAL LIBRARY URLs when available.
+- imageSource: canva | unsplash | shopify | library when relevant for stills
+- When BRAND VISUAL LIBRARY has matching themes, set productImageUrl to that library HTTPS URL and mirror the theme in imageSearchQuery / fullRequest.
+
+Schema:
+{
+  "reply": "short friendly confirmation that uses the brand/product name",
+  "supported": true,
+  "needsClarification": false,
+  "sentiment": "positive",
+  "executionBrief": {
+    "fullRequest": "Generate realistic 9:16 lifestyle video of Cream of Dreams, clean lifestyle moments, publish to Instagram Story via Runway",
+    "ctaText": "Cream of Dreams",
+    "imageSearchQuery": "clean lifestyle",
+    "mediaFormat": "story",
+    "videoSource": "runway"
+  },
+  "action": {
+    "id": "placeholder",
+    "title": "Instagram story: Cream of Dreams lifestyle AI video",
+    "channel": "instagram",
+    "day": "NOW",
+    "time": "5 min",
+    "impact": "high",
+    "difficulty": "Easy",
+    "why": "Show Cream of Dreams in clean lifestyle moments on Stories",
+    "outcome": "AI video story published featuring Cream of Dreams",
+    "kpi": "story views and replies"
+  }
+}
+
+Rules:
+- impact must be exactly "high", "med", or "low" (not "medium").
+- Use brand language; never invent a different brand.
+- If Runway + Instagram are connected and user wants AI video (or "lowest credit" Runway) on Instagram, EXECUTE with videoSource "runway" and mediaFormat "reel" (unless they explicitly said Story).
+- If user asks for a saved recipe that is image medium, use mediaFormat "feed" (or carousel) and omit videoSource.
+- Never map a Runway/video request to a static feed photo unless the recipe is explicitly image/still.
+- Escape double quotes. No markdown fences. Start with {`;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const message = await this.client.messages.create({
+        model: DEFAULT_MODEL,
+        max_tokens: 2048,
+        messages: [
+          {
+            role: 'user',
+            content:
+              attempt === 0
+                ? prompt
+                : `${prompt}\n\nYour previous reply was invalid JSON. Output ONLY valid JSON matching the schema. impact must be high|med|low.`,
+          },
+        ],
+      });
+
+      const text = this.extractTextContent(message);
+      try {
+        const parsed = parseAgentTaskJson(text);
+        const actionId = `adhoc-${randomUUID()}`;
+        if (parsed.supported && parsed.action) {
+          return {
+            ...parsed,
+            action: { ...parsed.action, id: actionId },
+            actionId,
+          };
+        }
+        return { ...parsed, actionId };
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          '[claude] agent task JSON parse failed:',
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    // Soft fallback — never surface cryptic Zod errors to the chat UI
+    console.error('[claude] agent task exhausted retries:', lastErr);
+    return {
+      reply:
+        'I understood you, but had trouble structuring the task. Reply with one line like: “Instagram story, Cream of Dreams, clean lifestyle, Runway video” and I’ll run it.',
+      supported: false,
+      needsClarification: true,
+      sentiment: 'neutral',
+      actionId: `adhoc-${randomUUID()}`,
+    };
+  }
+
+  private contentPublishPlanNotes(): string {
+    const lines: string[] = [
+      '  * AGENTIC EXECUTION: The agent creates all visuals and copy — never assign manual filming, shooting, or "post yourself" steps except paused paid ads awaiting approval.',
+      '  * Action titles: use "Create and publish" (feed/carousel) or "Generate Runway Reel and publish" (video) — never "Film + publish".',
+      '  * ONLY channel "paid" (Meta/Google ads) requires human approval before spend goes live — phrase as "Create paused campaign for review".',
+      '  * CRITICAL: Multiple Meta campaigns are fine AFTER prior ones have spend/performance data. Do NOT schedule new Meta campaigns while existing ones show $0 spend — feed performance into the next decision instead. Prefer organic / content until spend is enabled on an existing campaign.',
+    ];
+    if (isInstagramAutoPublishEnabled()) {
+      lines.push(
+        '  * Instagram feed posts, carousels, and image stories are AUTO-PUBLISHED — agent picks/creates images (Canva, Shopify, Runway campaign stills) and publishes.'
+      );
+      lines.push(
+        '  * When Canva and Instagram are both connected, plans may chain Canva design export → Instagram publish for on-brand creatives.'
+      );
+      lines.push(
+        '  * When Runway and Instagram are both connected, the agent generates AI Reels (Runway recipes: product_ad, product_ugc, text_to_video) and publishes automatically.'
+      );
+    }
+    if (isShopifyAutoPublishLiveEnabled()) {
+      lines.push(
+        '  * Shopify pages and single blog articles are AUTO-PUBLISHED live when Shopify is connected — phrase outcomes as "live page" or "published article", not "draft for review".'
+      );
+    }
+    return lines.length ? `\n- AUTO-PUBLISH (active):\n${lines.join('\n')}` : '';
+  }
+
   async generateGoogleAdsCampaign(input: {
     action: PlanAction;
     goal: string;
@@ -1101,6 +1468,8 @@ Rules:
     businessContext?: string | null;
     websiteUrl?: string | null;
     metaSnapshotText?: string | null;
+    /** Prior campaign performance + library — agent must learn from this */
+    performanceContext?: string | null;
   }): Promise<MetaAdsCampaignState> {
     const a = input.action;
     const defaultUrl = input.websiteUrl?.trim() || 'https://example.com';
@@ -1119,8 +1488,17 @@ PLAN ACTION:
 - KPI: ${a.kpi}
 
 ${input.metaSnapshotText ? `EXISTING META ADS DATA (last 30 days):\n${input.metaSnapshotText}\n` : ''}
+${input.performanceContext ? `${input.performanceContext}\n` : ''}
 
 Design one paused Meta campaign with 1-2 ad variants. Use exact budget and targeting from the action outcome (e.g. £4.30/day, UK 25-45).
+
+If prior campaigns have spend/clicks/purchases above, LEARN from them:
+- Reuse or refine angles that worked (WORKING / TRAFFIC).
+- Do not blindly clone weak spend campaigns.
+- Call out in "reasoning" which prior result informed this draft.
+If prior campaigns show $0 spend, you should not be inventing a stack of new tests — focus on one clear offer.
+
+Hundres will AUTOMATICALLY generate creative images for each ad (brand visual library, Canva, or Runway) — you write copy only. Do not invent image URLs.
 
 Schema:
 {
@@ -1142,10 +1520,11 @@ Schema:
       "headline": "headline max 40 chars",
       "description": "optional link description",
       "cta": "SHOP_NOW",
-      "finalUrl": "${defaultUrl}"
+      "finalUrl": "${defaultUrl}",
+      "imageBrief": "short visual direction for the AI image generator (product, setting, mood)"
     }
   ],
-  "reasoning": "2-3 sentences: why this budget, audience, and copy fit the action"
+  "reasoning": "2-3 sentences: why this budget, audience, and copy fit the action — cite prior Meta performance when available"
 }
 
 Rules:
@@ -1153,6 +1532,7 @@ Rules:
 - Use GBP if action mentions £, USD for $.
 - cta must be SHOP_NOW, LEARN_MORE, SIGN_UP, or ORDER_NOW.
 - 1-2 ads in ads array with distinct copy angles.
+- imageBrief should describe what to SHOW (no text overlays in the image).
 - No trailing commas. Start with {`;
 
     let lastErr: unknown;
@@ -1184,5 +1564,317 @@ Rules:
     }
 
     throw lastErr instanceof Error ? lastErr : new Error('Failed to generate Meta Ads campaign JSON');
+  }
+
+  async generateMailchimpSequence(input: {
+    action: PlanAction;
+    goal: string;
+    businessContext?: string | null;
+    fromName?: string | null;
+    replyTo?: string | null;
+    defaultAudienceName?: string | null;
+  }): Promise<MailchimpSequenceState> {
+    const a = input.action;
+    const fromName = input.fromName?.trim() || 'Team';
+    const replyTo = input.replyTo?.trim() || 'hello@example.com';
+    const audienceHint = input.defaultAudienceName?.trim() || 'Main audience';
+
+    const prompt = `You write email marketing sequences for a small business. Output ONLY valid JSON.
+
+GOAL: ${input.goal}
+BUSINESS: ${input.businessContext || 'Not provided'}
+FROM NAME: ${fromName}
+REPLY-TO EMAIL: ${replyTo}
+DEFAULT AUDIENCE NAME: ${audienceHint}
+
+PLAN ACTION:
+- Title: ${a.title}
+- Channel: ${a.channel}
+- Why: ${a.why}
+- Outcome: ${a.outcome}
+- KPI: ${a.kpi}
+
+Design 1–3 emails for a sequence (win-back, welcome, nurture, or list-building as implied by the action).
+Hundres creates these as DRAFTS in Mailchimp — never claim they were sent.
+
+Schema:
+{
+  "sequenceName": "short sequence name",
+  "audienceName": "${audienceHint}",
+  "fromName": "${fromName}",
+  "replyTo": "${replyTo}",
+  "emails": [
+    {
+      "dayOffset": 0,
+      "subject": "subject line",
+      "previewText": "optional inbox preview",
+      "bodyPlain": "full email body as plain text with line breaks",
+      "title": "internal campaign title"
+    }
+  ],
+  "reasoning": "2-3 sentences why this sequence fits the goal"
+}
+
+Rules:
+- 1–3 emails. Use dayOffset 0, 3, 7 (or similar) for spacing.
+- bodyPlain is plain text only (no HTML).
+- replyTo must be a valid email (use ${replyTo}).
+- Match tone to the brand. Be specific to the action outcome.
+- No trailing commas. Start with {`;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const message = await this.client.messages.create({
+        model: DEFAULT_MODEL,
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }],
+      });
+      const text = this.extractTextContent(message);
+      try {
+        return parseMailchimpSequenceJson(text);
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          '[claude] mailchimp sequence JSON parse failed:',
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error('Failed to generate Mailchimp sequence JSON');
+  }
+
+  /**
+   * Draft Business profile fields from a website (+ optional hints).
+   * Fetches the site HTML ourselves (Shopify-safe) — web_search alone often
+   * falsely reports live stores as "not accessible".
+   */
+  async draftBusinessProfile(input: {
+    website?: string | null;
+    notes?: string | null;
+    current?: {
+      oneLiner?: string | null;
+      audience?: string | null;
+      offer?: string | null;
+      emulate?: string | null;
+      budget?: string | null;
+    };
+  }): Promise<{
+    oneLiner: string;
+    audience: string;
+    offer: string;
+    emulate: string;
+    budget: string;
+  }> {
+    const websiteRaw = input.website?.trim() || '';
+    if (!websiteRaw && !input.notes?.trim() && !input.current?.oneLiner?.trim()) {
+      throw new Error('Add a website URL (or a short note) so AI can draft the profile.');
+    }
+
+    const page = websiteRaw ? await fetchWebsiteText(websiteRaw) : null;
+    const website = page?.finalUrl || websiteRaw;
+
+    if (websiteRaw && !page) {
+      console.warn('[claude] website fetch returned no text for', websiteRaw);
+    }
+
+    const siteBlock = page
+      ? `Fetched site (live — use this as primary source; ignore any claim the domain is down):
+Final URL: ${page.finalUrl}
+Title: ${page.title || '(none)'}
+Page text:
+"""
+${page.text}
+"""`
+      : websiteRaw
+        ? `Website URL provided but HTML could not be fetched from this server. Draft from the URL, user notes, and existing fields. Do NOT say the domain is inaccessible — the user confirmed it is live.`
+        : 'No website — draft only from user notes / existing fields.';
+
+    const prompt = `You write crisp business profile copy for a marketing autopilot product (Hundres).
+Output ONLY valid JSON (no markdown fences).
+
+Website entered: ${websiteRaw || '(not provided)'}
+User notes: ${input.notes?.trim() || '(none)'}
+Existing draft fields (prefer facts from the site; improve clarity; do not invent a different brand):
+- oneLiner: ${input.current?.oneLiner?.trim() || '(empty)'}
+- audience: ${input.current?.audience?.trim() || '(empty)'}
+- offer: ${input.current?.offer?.trim() || '(empty)'}
+- emulate: ${input.current?.emulate?.trim() || '(empty)'}
+- budget: ${input.current?.budget?.trim() || '(empty)'}
+
+${siteBlock}
+
+${
+  page
+    ? 'Optional: you may use web_search only for comparable competitor brand names (emulate). Do not re-check whether the domain is live.'
+    : websiteRaw
+      ? 'You may use web_search for the brand and niche. Prefer the apex domain (without www) if www fails.'
+      : ''
+}
+
+Return this exact shape:
+{
+  "oneLiner": "one sentence describing what the business is",
+  "audience": "who they sell to (2–4 sentences max)",
+  "offer": "what they sell / services / positioning (2–5 sentences max)",
+  "emulate": "2–5 comparable brands or competitors to study (comma-separated names or URLs), or empty string if unknown",
+  "budget": "keep existing budget text if provided; otherwise empty string — never invent a spend number"
+}
+
+Rules:
+- Specific and concrete — product names, niche, geography when known.
+- No hype fluff, no markdown, no invented metrics or fake awards.
+- Never claim the website is down, inaccessible, or inactive when page text was provided above.
+- If the site is thin, say what's clear and keep fields shorter rather than guessing.
+- Escape double quotes in strings. Start with {`;
+
+    // When we fetched the page ourselves, skip web_search — Anthropic search often
+    // falsely reports live Shopify stores (esp. www→apex) as inaccessible.
+    const useWebSearch = Boolean(websiteRaw) && !page;
+    let lastErr: unknown;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const text = await this.requestJsonText(
+          attempt === 0
+            ? prompt
+            : `${prompt}\n\nPrevious reply was invalid JSON. Output ONLY valid JSON matching the schema. Do not mention domain accessibility.`,
+          useWebSearch
+        );
+        const raw = extractJsonFromModelText(text) as Record<string, unknown>;
+        const str = (key: string, max: number) => {
+          const v = raw[key];
+          if (typeof v !== 'string') return '';
+          return v.trim().slice(0, max);
+        };
+        const oneLiner = str('oneLiner', 300);
+        const audience = str('audience', 2000);
+        const offer = str('offer', 2000);
+        const blob = `${oneLiner} ${audience} ${offer}`.toLowerCase();
+        if (/not currently accessible|not accessible or active|domain .+ is down/.test(blob)) {
+          throw new Error('AI draft ignored live site content — retrying');
+        }
+        if (!oneLiner && !audience && !offer) {
+          throw new Error('AI returned an empty profile draft');
+        }
+        return {
+          oneLiner,
+          audience,
+          offer,
+          emulate: str('emulate', 2000),
+          budget: str('budget', 200) || (input.current?.budget?.trim() ?? ''),
+        };
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          '[claude] business profile draft failed:',
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error('Failed to draft business profile');
+  }
+
+  /**
+   * Draft a Runway text_to_image / text_to_video recipe prompt from the business profile.
+   * Keeps {{brand}}, {{product}}, {{vibe}}, {{brief}}, {{audience}}, {{offer}} placeholders.
+   */
+  async draftRunwayPrompt(input: {
+    engine: 'text_to_image' | 'text_to_video';
+    profile: {
+      website?: string | null;
+      oneLiner?: string | null;
+      audience?: string | null;
+      offer?: string | null;
+      emulate?: string | null;
+    };
+    recipeName?: string | null;
+    concept?: string | null;
+    currentPrompt?: string | null;
+  }): Promise<{
+    promptTemplate: string;
+    styleNotes: string;
+    negativePrompt: string;
+    name: string;
+    description: string;
+  }> {
+    const isVideo = input.engine === 'text_to_video';
+    const mediumLabel = isVideo ? 'vertical 9:16 Instagram Reel / marketing video' : 'vertical 9:16 Instagram feed photograph';
+
+    const prompt = `You write reusable Runway ${isVideo ? 'text-to-video' : 'text-to-image'} prompt templates for Hundres.
+Output ONLY valid JSON (no markdown fences).
+
+Business profile:
+- Website: ${input.profile.website?.trim() || '(none)'}
+- One-liner: ${input.profile.oneLiner?.trim() || '(none)'}
+- Audience: ${input.profile.audience?.trim() || '(none)'}
+- Offer: ${input.profile.offer?.trim() || '(none)'}
+- Brands to emulate (inspiration only): ${input.profile.emulate?.trim() || '(none)'}
+
+Recipe name hint: ${input.recipeName?.trim() || '(none)'}
+Concept / notes: ${input.concept?.trim() || '(none)'}
+Current prompt (improve; do not invent a different brand): ${input.currentPrompt?.trim() || '(empty)'}
+
+Return:
+{
+  "name": "short recipe name the user will recognize",
+  "description": "one line when to use this recipe",
+  "promptTemplate": "full reusable prompt for a ${mediumLabel}. MUST include these placeholders where relevant: {{brand}}, {{product}}, {{vibe}}, {{brief}}, {{audience}}, {{offer}}. Be specific about lighting, camera, setting, product hero, and brand mood from the profile. No logos or on-image text.",
+  "styleNotes": "compact look-and-feel extras (lighting, grade, lens)",
+  "negativePrompt": "comma-separated things to avoid (logos, text overlays, watermarks, plus anything off-brand)"
+}
+
+Rules:
+- promptTemplate must stay under 900 characters.
+- Keep placeholders as literal {{brand}} etc. — do not fill them with real values.
+- Photorealistic, premium, on-brand for this business — not generic stock.
+- Escape double quotes. Start with {`;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const text = await this.requestJsonText(
+          attempt === 0
+            ? prompt
+            : `${prompt}\n\nPrevious reply was invalid JSON. Output ONLY valid JSON. Keep {{placeholders}} literal.`,
+          false
+        );
+        const raw = extractJsonFromModelText(text) as Record<string, unknown>;
+        const str = (key: string, max: number) => {
+          const v = raw[key];
+          if (typeof v !== 'string') return '';
+          return v.trim().slice(0, max);
+        };
+        let promptTemplate = str('promptTemplate', 2000);
+        if (!promptTemplate) throw new Error('AI returned an empty prompt');
+        // Ensure core placeholders exist so runtime fill works
+        if (!/\{\{\s*brand\s*\}\}/i.test(promptTemplate)) {
+          promptTemplate = `Brand: {{brand}}. ${promptTemplate}`;
+        }
+        if (!/\{\{\s*brief\s*\}\}/i.test(promptTemplate)) {
+          promptTemplate = `${promptTemplate} {{brief}}`;
+        }
+        return {
+          name: str('name', 200) || (isVideo ? 'Brand text-to-video' : 'Brand text-to-image'),
+          description: str('description', 500),
+          promptTemplate: promptTemplate.replace(/\s{2,}/g, ' ').trim().slice(0, 2000),
+          styleNotes: str('styleNotes', 500),
+          negativePrompt: str('negativePrompt', 500) || 'logos, text overlays, watermarks',
+        };
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          '[claude] runway prompt draft failed:',
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error('Failed to draft Runway prompt');
   }
 }

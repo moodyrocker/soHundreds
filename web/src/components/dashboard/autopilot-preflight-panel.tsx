@@ -4,6 +4,7 @@ import { Button } from '@/components/hundres/button';
 import { Chip } from '@/components/hundres/chip';
 import { SnapshotDataViewer } from '@/components/dashboard/snapshot-data-viewer';
 import type { AutopilotPreflight } from '@/lib/execution';
+import { sanitizeAgentCopy } from '@/lib/plain-language';
 
 type Props = {
   preflight: AutopilotPreflight;
@@ -54,7 +55,7 @@ export function AutopilotPreflightPanel({
             How autopilot will use this data
           </div>
           <p className="t-dim" style={{ fontSize: 13, margin: 0, lineHeight: 1.55 }}>
-            {preflight.weekReasoning}
+            {sanitizeAgentCopy(preflight.weekReasoning)}
           </p>
         </div>
       ) : null}
@@ -124,7 +125,7 @@ export function AutopilotPreflightPanel({
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {!confirmed ? (
           <Button variant="primary" type="button" disabled={confirming} onClick={onConfirm}>
-            {confirming ? 'Preparing actions…' : 'Confirm & prepare this week'}
+            {confirming ? 'Agent preparing actions…' : 'Prepare all actions'}
           </Button>
         ) : null}
         <Button variant="ghost" type="button" disabled={confirming} onClick={onRefresh}>

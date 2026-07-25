@@ -7,15 +7,20 @@ import { useAuth } from '@/providers/auth-provider';
 
 const navItems = [
   { href: '/', label: 'Autopilot', icon: 'home' as const, kbd: 'H' },
+  { href: '/ask', label: 'Ask the agent', icon: 'sparkle' as const },
+  { href: '/activity', label: 'Activity log', icon: 'insights' as const },
   { href: '/new', label: 'New goal', icon: 'sparkle' as const, kbd: 'N' },
-  { href: '/plan', label: 'Full plan', icon: 'plans' as const },
+  { href: '/plan', label: 'Control room', icon: 'plans' as const },
 ];
 
 const secondaryItems: Array<
-  | { href: string; label: string; icon: 'settings' | 'insights' | 'library' }
-  | { label: string; icon: 'settings' | 'insights' | 'library' }
+  | { href: string; label: string; icon: 'settings' | 'insights' | 'library' | 'plans' | 'target' | 'sparkle' }
+  | { label: string; icon: 'settings' | 'insights' | 'library' | 'plans' | 'target' | 'sparkle' }
 > = [
-  { href: '/business', label: 'Business', icon: 'library' },
+  { href: '/business', label: 'Business', icon: 'insights' },
+  { href: '/visuals', label: 'Visual library', icon: 'library' },
+  { href: '/runway', label: 'Runway', icon: 'sparkle' },
+  { href: '/ads', label: 'Ad campaigns', icon: 'target' },
   { href: '/integrations', label: 'Connect', icon: 'settings' },
   { href: '/settings', label: 'Settings', icon: 'settings' },
 ];
@@ -43,7 +48,11 @@ export function Sidebar() {
       <div className="nav-section">
         <div className="nav-label">Menu</div>
         {navItems.map((item) => {
-          const active = pathname === item.href || (item.href === '/plan' && pathname.startsWith('/plan'));
+          const active =
+            pathname === item.href ||
+            (item.href === '/plan' && pathname.startsWith('/plan')) ||
+            (item.href === '/activity' && pathname.startsWith('/activity')) ||
+            (item.href === '/ask' && pathname.startsWith('/ask'));
           return (
             <Link key={item.href} href={item.href} className={`nav-item${active ? ' active' : ''}`}>
               <Icon name={item.icon} />
@@ -61,7 +70,15 @@ export function Sidebar() {
             <Link
               key={item.label}
               href={item.href}
-              className={`nav-item${pathname === item.href ? ' active' : ''}`}
+              className={`nav-item${
+                pathname === item.href ||
+                (item.href === '/visuals' && pathname.startsWith('/visuals')) ||
+                (item.href === '/runway' &&
+                  (pathname.startsWith('/runway') || pathname.startsWith('/recipes'))) ||
+                (item.href === '/ads' && pathname.startsWith('/ads'))
+                  ? ' active'
+                  : ''
+              }`}
             >
               <Icon name={item.icon} />
               <span>{item.label}</span>
