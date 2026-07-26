@@ -1,0 +1,52 @@
+# Secrets / local env
+.env
+.env.local
+.env.*.local
+
+# Dependencies & build
+node_modules/
+backend/node_modules/
+backend/dist/
+web/node_modules/
+web/.next/
+web/out/
+dist/
+build/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Archives
+*.zip
+*.ZIP
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Office / document binaries (keep markdown in docs/ tracked)
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.odt
+*.ods
+*.odp
+*.rtf
+*.pdf
+*.PDF
+
+# Local scratch
+moody.readme.md
+hundres_patch/
+*.log
+*.zip
