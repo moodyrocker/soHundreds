@@ -1,9 +1,8 @@
 name: CI
 
 # The repo had no CI at all, so nothing stopped a broken commit reaching main.
-# This is deliberately cheap and fast — typecheck, lint, build, and a real
-# migration run. It does not yet run unit tests because there aren't any; add a
-# `test` job here once the JSON-parser tests exist.
+# Deliberately cheap and fast: typecheck, unit tests, lint, build, a real
+# migration run against Postgres, and both Docker images.
 
 on:
   push:
@@ -37,8 +36,24 @@ jobs:
         run: npm run typecheck
         working-directory: backend
 
+      - name: Unit tests
+        run: npm test
+        working-directory: backend
+
       - name: Build
         run: npm run build
+        working-directory: backend
+
+      - name: Verify tests did not leak into the build output
+        # tsconfig excludes *.test.ts. If that exclusion regresses, test files and
+        # their fixtures ship inside the container image.
+        run: |
+          if find dist -name '*.test.js' | grep -q .; then
+            echo "::error::compiled test files found in dist/"
+            find dist -name '*.test.js'
+            exit 1
+          fi
+          echo "OK — no test files in dist/"
         working-directory: backend
 
       - name: Verify both entrypoints were emitted

@@ -65,7 +65,12 @@ function decryptionKeys(): Buffer[] {
 
 function splitPayload(b64: string): { iv: Buffer; authTag: Buffer; body: Buffer } {
   const data = Buffer.from(b64, 'base64');
-  if (data.length <= IV_LENGTH + AUTH_TAG_LENGTH) {
+
+  // `<` not `<=`: encrypting an empty string yields a zero-length body, so a
+  // valid payload can be exactly IV + tag. Using `<=` made
+  // decrypt(encrypt('')) throw "too short" — a round-trip that should hold for
+  // every input.
+  if (data.length < IV_LENGTH + AUTH_TAG_LENGTH) {
     throw new Error('Ciphertext is too short to be valid');
   }
   return {
@@ -85,6 +90,12 @@ export function encrypt(plaintext: string): string {
 }
 
 export function decrypt(ciphertext: string): string {
+  // Resolve keys first. A missing ENCRYPTION_KEY is a deployment mistake, and
+  // reporting it as "ciphertext is too short" (which is what happened when
+  // payload parsing ran first) sends whoever is debugging in entirely the wrong
+  // direction.
+  const keys = decryptionKeys();
+
   const trimmed = ciphertext.trim();
 
   // Only split on a recognised version prefix — base64 never contains ':', but
@@ -102,7 +113,7 @@ export function decrypt(ciphertext: string): string {
   const { iv, authTag, body } = splitPayload(payload);
 
   let lastError: unknown;
-  for (const key of decryptionKeys()) {
+  for (const key of keys) {
     try {
       const decipher = createDecipheriv(ALGORITHM, key, iv);
       decipher.setAuthTag(authTag);

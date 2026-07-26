@@ -13,5 +13,7 @@
     "declaration": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  // Tests sit beside the code but must not reach the build output, or
+  // dist/ would carry them into the container image.
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "vitest.config.ts"]
 }

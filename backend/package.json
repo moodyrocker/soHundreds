@@ -8,6 +8,8 @@
     "dev:worker": "tsx watch src/workers/autopilotWorkerMain.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "start": "node dist/index.js",
     "start:worker": "node dist/workers/autopilotWorkerMain.js",
     "db:migrate": "tsx src/database/migrate.ts",
@@ -30,6 +32,7 @@
     "@types/node": "^22.13.4",
     "@types/pg": "^8.11.11",
     "tsx": "^4.19.3",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
   }
 }
