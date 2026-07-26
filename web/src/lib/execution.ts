@@ -172,8 +172,15 @@ export type ExecutionPayload =
   | MailchimpSequenceState
   | AssistDeliverable;
 
+/**
+ * Mirrors backend/src/types/execution.ts.
+ *
+ * `executing` means an external write is in flight and has been claimed by one
+ * caller — the UI should show it as busy and must not offer Approve again.
+ */
 export type ExecutionStatus =
   | 'previewed'
+  | 'executing'
   | 'executed'
   | 'skipped'
   | 'failed'

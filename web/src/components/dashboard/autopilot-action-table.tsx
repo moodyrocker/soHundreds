@@ -105,6 +105,9 @@ function resolveProgress(
   if (execution?.status === 'executed') return 'ready';
   if (execution?.status === 'skipped') return 'skipped';
   if (execution?.status === 'failed') return 'failed';
+  // An external write is in flight and claimed by one caller — never offer
+  // Approve again while in this state.
+  if (execution?.status === 'executing') return 'working';
 
   if (orchestrator) {
     switch (orchestrator.runStatus) {

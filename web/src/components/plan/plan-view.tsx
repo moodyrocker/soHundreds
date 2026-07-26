@@ -44,6 +44,7 @@ function executionStatusLabel(execution: ExecutionRecord): string | null {
   if (execution.status === 'rolled_back') return 'Rolled back';
   if (execution.status === 'skipped') return 'Skipped';
   if (execution.status === 'failed') return 'Failed';
+  if (execution.status === 'executing') return 'Applying…';
   if (execution.status === 'previewed') return 'Ready to approve';
   return null;
 }

@@ -22,8 +22,24 @@ export type ExecutionType =
   | 'publish_instagram_reel'
   | 'assist_deliverable';
 
+/**
+ * Lifecycle of an execution.
+ *
+ * `executing` is the claim state: exactly one caller can transition
+ * previewed -> executing (see ExecutionService.claimExecutionForWrite), and only
+ * that caller performs the external write. It exists so a double-click on
+ * Approve, or the autopilot worker racing an operator, cannot create the same
+ * Shopify page or ad campaign twice.
+ *
+ *   previewed -> executing -> executed      (success)
+ *             -> executing -> previewed     (pre-flight refusal, retryable)
+ *             -> executing -> failed        (external API error)
+ *             -> skipped
+ *   executed  -> rolled_back
+ */
 export type ExecutionStatus =
   | 'previewed'
+  | 'executing'
   | 'executed'
   | 'skipped'
   | 'failed'

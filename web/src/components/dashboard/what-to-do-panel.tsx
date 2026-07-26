@@ -34,6 +34,17 @@ export function buildExplicitWhatToDoSteps(input: WhatToDoInput): string[] {
     return steps;
   }
 
+  // ── Write in flight ───────────────────────────────────────────────────────
+  // 'executing' means one caller holds the execution claim and is mid-write to
+  // the external platform. Manual instructions here would invite the user to
+  // duplicate the very write we just made single-owner, so short-circuit.
+  if (input.executionStatus === 'executing') {
+    steps.push('Hundres is applying this change on the platform right now — no action needed.');
+    steps.push('This panel will update on its own once the write completes.');
+    steps.push('If it is still showing this after a few minutes, check the Activity log for a Failed row.');
+    return steps;
+  }
+
   // ── Not yet generated ─────────────────────────────────────────────────────
   // Show pre-generation steps when autopilot hasn't run for this action yet.
   if (!input.executionExists && !input.executionType) {

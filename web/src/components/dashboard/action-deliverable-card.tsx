@@ -112,7 +112,11 @@ export function ActionDeliverableCard({
           ? 'ready'
           : execution.status === 'previewed'
             ? 'review'
-            : execution.status;
+            : // 'executing' means the external write is claimed and in flight —
+              // present it as running so no approval affordance is offered.
+              execution.status === 'executing'
+              ? 'running'
+              : execution.status;
 
   const assist =
     execution && isAssistDeliverable(execution.proposedState) ? execution.proposedState : null;

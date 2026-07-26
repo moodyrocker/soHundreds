@@ -32,6 +32,7 @@ import {
   type OrgIntegrationFlags,
 } from '../executors/actionRouter.js';
 import { shopifyHasWriteContentScope, shopifyHasWriteProductsScope } from '../lib/shopifyAdmin.js';
+import { INSTANCE_ID } from '../lib/workerIdentity.js';
 import { AuditLogService } from './auditLogService.js';
 import { AutopilotActivityService } from './autopilotActivityService.js';
 import { AutopilotPreflightService } from './autopilotPreflightService.js';
@@ -1449,41 +1450,71 @@ export class ExecutionService {
     return `Created paused Google Ads campaign "${campaignName}" — enable it in Google Ads when ready.`;
   }
 
+  /**
+   * Approves an execution and performs its external write.
+   *
+   * Every path below actuates something irreversible on a third-party platform
+   * — a live Shopify page, a published Instagram post, a funded ad campaign. So
+   * the execution is claimed atomically first (see claimExecutionForWrite) and
+   * only the caller that wins the claim proceeds. A losing caller gets a clear
+   * error rather than silently duplicating the write.
+   */
   async approve(
     organizationId: string,
     executionId: string,
     edits?: Partial<Pick<ProductSeoState, 'seoTitle' | 'seoDescription'>>
   ): Promise<ExecutionRecord> {
-    const row = await this.getRow(organizationId, executionId);
-    if (row.status !== 'previewed') {
-      throw new Error(`Cannot approve execution in status "${row.status}"`);
+    // Read first purely to produce a useful message for the common,
+    // non-racing failure cases (wrong status, unsupported type).
+    const existing = await this.getRow(organizationId, executionId);
+    if (existing.status !== 'previewed') {
+      throw new Error(`Cannot approve execution in status "${existing.status}"`);
     }
-
-    if (row.execution_type === 'create_shopify_page') {
-      return this.approveShopifyPage(organizationId, executionId, row);
-    }
-
-    if (row.execution_type === 'create_shopify_blog_article') {
-      return this.approveShopifyBlogArticle(organizationId, executionId, row);
-    }
-
-    if (row.execution_type === 'create_google_ads_campaign') {
-      return this.approveGoogleAdsCampaign(organizationId, executionId, row);
-    }
-
-    if (row.execution_type === 'create_meta_ads_campaign') {
-      return this.approveMetaAdsCampaign(organizationId, executionId, row);
-    }
-
-    if (row.execution_type === 'create_mailchimp_drafts') {
-      return this.approveMailchimpSequence(organizationId, executionId, row);
-    }
-
-    if (row.execution_type !== 'update_product_seo') {
+    if (
+      existing.execution_type !== 'create_shopify_page' &&
+      existing.execution_type !== 'create_shopify_blog_article' &&
+      existing.execution_type !== 'create_google_ads_campaign' &&
+      existing.execution_type !== 'create_meta_ads_campaign' &&
+      existing.execution_type !== 'create_mailchimp_drafts' &&
+      existing.execution_type !== 'update_product_seo'
+    ) {
       throw new Error('Only Shopify or ad platform writes require approval');
     }
 
-    return this.approveProductSeo(organizationId, executionId, row, edits);
+    const row = await this.claimExecutionForWrite(organizationId, executionId);
+    if (!row) {
+      // Lost the race. Report the state the winner left behind so the caller
+      // (or the activity log) shows what actually happened.
+      const current = await this.getRow(organizationId, executionId);
+      throw new Error(
+        current.status === 'executing'
+          ? 'This execution is already running — another approval is in flight.'
+          : `Cannot approve execution in status "${current.status}"`
+      );
+    }
+
+    try {
+      switch (row.execution_type) {
+        case 'create_shopify_page':
+          return await this.approveShopifyPage(organizationId, executionId, row);
+        case 'create_shopify_blog_article':
+          return await this.approveShopifyBlogArticle(organizationId, executionId, row);
+        case 'create_google_ads_campaign':
+          return await this.approveGoogleAdsCampaign(organizationId, executionId, row);
+        case 'create_meta_ads_campaign':
+          return await this.approveMetaAdsCampaign(organizationId, executionId, row);
+        case 'create_mailchimp_drafts':
+          return await this.approveMailchimpSequence(organizationId, executionId, row);
+        default:
+          return await this.approveProductSeo(organizationId, executionId, row, edits);
+      }
+    } catch (err) {
+      // No-op when the handler already reached 'failed'; restores 'previewed'
+      // when the throw came from a pre-flight refusal (missing scope, channel
+      // cap, SEO cooldown) that never touched the external API.
+      await this.releaseExecutionClaim(organizationId, executionId);
+      throw err;
+    }
   }
 
   private async approveProductSeo(
@@ -2876,5 +2907,75 @@ export class ExecutionService {
       throw new Error('Execution not found');
     }
     return row;
+  }
+
+  /**
+   * Atomically takes ownership of an execution before any external write.
+   *
+   * Replaces the previous read-then-check pattern:
+   *
+   *   const row = await this.getRow(...);
+   *   if (row.status !== 'previewed') throw ...;   // <- gap
+   *   await externalApi.create(...);               // <- both callers get here
+   *   await query(`UPDATE ... SET status = 'executed'`);
+   *
+   * Two callers could both pass the check before either wrote, so a user
+   * double-clicking Approve — or the autopilot worker racing an operator —
+   * could create the same Shopify page or, more expensively, the same Meta ad
+   * campaign twice. The window was real even on a single instance.
+   *
+   * `WHERE status = 'previewed'` makes the transition the serialisation point:
+   * Postgres applies row-level locking to the UPDATE, so exactly one caller
+   * observes rowCount 1 and every other caller observes 0. Only the winner
+   * proceeds to the external API.
+   *
+   * Returns the claimed row, or null if another caller already holds it.
+   */
+  private async claimExecutionForWrite(
+    organizationId: string,
+    executionId: string
+  ): Promise<ExecutionRow | null> {
+    const result = await query<ExecutionRow>(
+      `UPDATE action_executions
+       SET status = 'executing',
+           claimed_at = NOW(),
+           claimed_by = $3,
+           attempt_count = attempt_count + 1,
+           updated_at = NOW()
+       WHERE id = $1
+         AND organization_id = $2
+         AND status = 'previewed'
+       RETURNING *`,
+      [executionId, organizationId, INSTANCE_ID]
+    );
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Returns a claimed execution to 'previewed' so it can be retried.
+   *
+   * Guarded by `status = 'executing'` so it is a no-op when the handler has
+   * already reached a terminal state. That matters because the per-type
+   * handlers set status = 'failed' in their own catch blocks after an external
+   * call fails — we must not resurrect those. This only rescues throws that
+   * happen *before* the external write: missing OAuth scope, daily channel cap
+   * reached, SEO cooldown still active. Those were retryable before this change
+   * and must stay retryable.
+   */
+  private async releaseExecutionClaim(
+    organizationId: string,
+    executionId: string
+  ): Promise<void> {
+    await query(
+      `UPDATE action_executions
+       SET status = 'previewed',
+           claimed_at = NULL,
+           claimed_by = NULL,
+           updated_at = NOW()
+       WHERE id = $1
+         AND organization_id = $2
+         AND status = 'executing'`,
+      [executionId, organizationId]
+    );
   }
 }
