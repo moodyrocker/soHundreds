@@ -1,7 +1,11 @@
 # Secrets / local env
+# Broad by design: the previous pattern only caught .env, .env.local and
+# .env.*.local, so variants like .env.backup or .env.production would have been
+# committed. Everything .env* is ignored except the checked-in examples.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Dependencies & build
 node_modules/
