@@ -1,0 +1,236 @@
+name: CI
+
+# The repo had no CI at all, so nothing stopped a broken commit reaching main.
+# This is deliberately cheap and fast — typecheck, lint, build, and a real
+# migration run. It does not yet run unit tests because there aren't any; add a
+# `test` job here once the JSON-parser tests exist.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A newer push to the same branch supersedes an in-flight run.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend — typecheck & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # matches node:22-alpine in backend/Dockerfile
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+        working-directory: backend
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: backend
+
+      - name: Build
+        run: npm run build
+        working-directory: backend
+
+      - name: Verify both entrypoints were emitted
+        # docker-entrypoint.sh execs these by path, so a build that silently
+        # stops emitting one of them would only fail at container start.
+        run: |
+          set -e
+          for f in dist/index.js dist/database/migrate.js dist/workers/autopilotWorkerMain.js; do
+            test -f "$f" || { echo "MISSING $f"; exit 1; }
+            echo "OK $f"
+          done
+        working-directory: backend
+
+  web:
+    name: Web — typecheck, lint & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+        working-directory: web
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+        working-directory: web
+
+      - name: Lint
+        run: npm run lint
+        working-directory: web
+
+      - name: Build
+        run: npm run build
+        working-directory: web
+        env:
+          # next build evaluates these at build time. Dummy values are fine —
+          # nothing here contacts Supabase.
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+
+  migrations:
+    name: Migrations — fresh database
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hundres_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+        working-directory: backend
+
+      - name: Create the Supabase-specific objects the migrations assume
+        # Migrations reference auth.users and auth.uid(), which Supabase provides
+        # and a bare Postgres does not.
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE EXTENSION IF NOT EXISTS pgcrypto;
+          CREATE SCHEMA IF NOT EXISTS auth;
+          CREATE TABLE IF NOT EXISTS auth.users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            email TEXT,
+            raw_user_meta_data JSONB DEFAULT '{}'::jsonb
+          );
+          CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID
+            LANGUAGE sql STABLE AS
+            $$ SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+          DO $$ BEGIN CREATE ROLE anon NOLOGIN;
+            EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          DO $$ BEGIN CREATE ROLE authenticated NOLOGIN;
+            EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+          GRANT USAGE ON SCHEMA public TO anon, authenticated;
+          -- Reproduce Supabase's default grants, so the revoke in
+          -- 20260726100000_rls_all_tables.sql is actually exercised.
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+            GRANT ALL ON TABLES TO anon, authenticated;
+          SQL
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hundres_ci
+
+      - name: Apply migrations to a fresh database
+        # The pre-fix schema.sql could not be applied to an empty database at all
+        # (dangling FK to a table it never created), which would have crash-looped
+        # the API container on any new environment. This job is what stops that
+        # class of bug returning.
+        run: npm run db:migrate
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hundres_ci
+          DATABASE_SSL: 'false'
+
+      - name: Re-run — must be a no-op
+        run: npm run db:migrate 2>&1 | tee /tmp/rerun.log
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hundres_ci
+          DATABASE_SSL: 'false'
+
+      - name: Assert the re-run applied nothing
+        run: grep -q 'complete — 0 applied' /tmp/rerun.log
+
+      - name: Assert RLS covers every table
+        # Mirrors the assertion inside the RLS migration, but fails the build
+        # rather than only emitting a notice.
+        run: |
+          UNPROTECTED=$(psql "$DATABASE_URL" -t -A -c "
+            SELECT COALESCE(string_agg(c.relname, ', '), '')
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname='public' AND c.relkind='r' AND NOT c.relrowsecurity;")
+          if [ -n "$UNPROTECTED" ]; then
+            echo "::error::Tables without RLS: $UNPROTECTED"
+            exit 1
+          fi
+          echo "OK — every public table has RLS enabled"
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hundres_ci
+
+      - name: Assert browser-facing roles have no direct table access
+        run: |
+          GRANTED=$(psql "$DATABASE_URL" -t -A -c "
+            SELECT count(*) FROM information_schema.role_table_grants
+            WHERE table_schema='public' AND grantee IN ('anon','authenticated');")
+          if [ "$GRANTED" != "0" ]; then
+            echo "::error::$GRANTED table grants still held by anon/authenticated"
+            exit 1
+          fi
+          echo "OK — anon/authenticated hold no table grants"
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hundres_ci
+
+      - name: Assert claim columns exist
+        run: |
+          N=$(psql "$DATABASE_URL" -t -A -c "
+            SELECT count(*) FROM information_schema.columns
+            WHERE table_schema='public' AND (
+              (table_name='strategies' AND column_name IN ('cycle_claimed_at','cycle_claimed_by'))
+              OR (table_name='action_executions' AND column_name IN ('claimed_at','claimed_by','attempt_count')));")
+          [ "$N" = "5" ] || { echo "::error::expected 5 claim columns, found $N"; exit 1; }
+          echo "OK — all 5 claim columns present"
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hundres_ci
+
+  docker:
+    name: Docker — images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build api/worker image
+        # Context is the repo root, not ./backend — the image needs
+        # supabase/migrations. Building from inside backend/ fails, and this job
+        # is what catches a regression in that wiring.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./backend/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          push: false
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=ci-placeholder-anon-key
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
