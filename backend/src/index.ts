@@ -1,4 +1,5 @@
-import 'dotenv/config';
+// Must precede any import that reads process.env at module scope.
+import './lib/loadEnv.js';
 import Anthropic from '@anthropic-ai/sdk';
 import cors from 'cors';
 import express from 'express';
@@ -119,12 +120,26 @@ app.use(
 
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
-  void import('./workers/autopilotCycleWorker.js')
-    .then(({ startAutopilotCycleWorker }) => startAutopilotCycleWorker())
-    .catch((err) => {
-      console.error(
-        '[autopilot-cycle] failed to start worker:',
-        err instanceof Error ? err.message : err
-      );
-    });
+
+  // The autopilot loop runs in its own process (see workers/autopilotWorkerMain.ts
+  // and the `worker` service in docker-compose.yml). The API does NOT start it:
+  // API replicas must stay stateless so they can be scaled or rolled without
+  // multiplying the number of processes driving the agent.
+  //
+  // Set AUTOPILOT_CYCLE_WORKER=true to opt in — useful only for a single-process
+  // local run with no worker container. Never set it on a scaled API.
+  if (process.env.AUTOPILOT_CYCLE_WORKER?.trim().toLowerCase() === 'true') {
+    console.warn(
+      '[autopilot-cycle] AUTOPILOT_CYCLE_WORKER=true — running the agent loop inside the API process. ' +
+        'Safe only with a single API replica; use the dedicated worker service otherwise.'
+    );
+    void import('./workers/autopilotCycleWorker.js')
+      .then(({ startAutopilotCycleWorker }) => startAutopilotCycleWorker())
+      .catch((err) => {
+        console.error(
+          '[autopilot-cycle] failed to start worker:',
+          err instanceof Error ? err.message : err
+        );
+      });
+  }
 });

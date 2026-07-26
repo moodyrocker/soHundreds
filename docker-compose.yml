@@ -3,8 +3,10 @@ services:
   # See MCP_ARCHITECTURE.md — analytical core (GA, Ads, Meta) + Shopify commerce/actuation
   api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      # Root context so supabase/migrations can be copied into the image —
+      # the migration runner applies those files directly.
+      context: .
+      dockerfile: ./backend/Dockerfile
     ports:
       - "${PORT:-3001}:3001"
     env_file:
@@ -12,6 +14,11 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_SSL: "true"
+      CONTAINER_ROLE: api
+      # The agent loop lives in the `worker` service below. Keep this false on
+      # the API so scaling API replicas cannot multiply the number of processes
+      # driving the autopilot.
+      AUTOPILOT_CYCLE_WORKER: "false"
     restart: unless-stopped
     healthcheck:
       test:
@@ -25,6 +32,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # Autopilot cycle worker — same image as `api`, different role.
+  #
+  # Split out because a cycle can run for many minutes (several Claude calls
+  # plus external API work; Runway video alone is 10-15 minutes) and must not
+  # share a lifecycle with HTTP request handling. Work is claimed atomically in
+  # Postgres (FOR UPDATE SKIP LOCKED), so running more than one replica is safe
+  # — but start with one and raise AUTOPILOT_CYCLE_CONCURRENCY first.
+  worker:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_SSL: "true"
+      CONTAINER_ROLE: worker
+      # How often to wake and look for due strategies.
+      AUTOPILOT_CYCLE_TICK_MINUTES: ${AUTOPILOT_CYCLE_TICK_MINUTES:-5}
+      # Strategies claimed per tick, and how many run at once. Concurrency is
+      # bounded so a batch cannot stampede the Anthropic API or the PG pool.
+      AUTOPILOT_CYCLE_BATCH_SIZE: ${AUTOPILOT_CYCLE_BATCH_SIZE:-10}
+      AUTOPILOT_CYCLE_CONCURRENCY: ${AUTOPILOT_CYCLE_CONCURRENCY:-3}
+      # A claim held longer than this is treated as orphaned and reclaimed.
+      # Must exceed the longest realistic cycle.
+      AUTOPILOT_CLAIM_STALE_MINUTES: ${AUTOPILOT_CLAIM_STALE_MINUTES:-30}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    # Give in-flight cycles a chance to finish and release their claims on
+    # SIGTERM before Docker escalates to SIGKILL.
+    stop_grace_period: 60s
 
   web:
     build:

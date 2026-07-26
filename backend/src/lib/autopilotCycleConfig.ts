@@ -3,6 +3,14 @@
  *
  * Default: wake every 5 minutes; full process at least hourly.
  * Strategies with pending work are always due on the next tick.
+ *
+ * Batch size, concurrency and claim staleness live in lib/workerIdentity.ts.
+ *
+ * Note on isAutopilotCycleWorkerEnabled(): this still defaults to true, but the
+ * API no longer consults it — index.ts requires an explicit
+ * AUTOPILOT_CYCLE_WORKER=true to run the loop in-process. The dedicated worker
+ * entrypoint (workers/autopilotWorkerMain.ts) sets the variable itself, so the
+ * default only affects direct calls to startAutopilotCycleWorker().
  */
 
 export function getAutopilotCycleHours(): number {
