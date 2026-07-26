@@ -1,8 +1,41 @@
+# Build context is the repository root (see backend/Dockerfile), so this file
+# governs what gets sent to the daemon for the api/worker images. Keep it tight:
+# everything listed here is excluded from the context entirely.
+#
+# supabase/migrations MUST remain included — the migration runner reads it.
+
+# Dependencies and build output (npm ci runs inside the image)
 node_modules
+**/node_modules
 dist
+**/dist
+.next
+**/.next
+out
+**/out
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Secrets
 .env
 .env.*
 !.env.example
+
+# VCS, editors, OS
 .git
-*.md
+.gitignore
 .cursor
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+
+# Docs and guides — not needed at runtime
+*.md
+docs
+
+# Not part of the api/worker image
+UIHundreds
+web
+scripts
+supabase/config.toml

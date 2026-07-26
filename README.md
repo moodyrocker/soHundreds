@@ -11,6 +11,7 @@ Goal-driven marketing operator — **weekly autopilot toward a measurable goal**
 | **[docs/DOCUMENTATION.md](./docs/DOCUMENTATION.md)** | **All docs in one place** |
 | **[docs/ORIGIN_AND_STATUS.md](./docs/ORIGIN_AND_STATUS.md)** | Original goal vs today (go-live map) |
 | **[docs/META_FACEBOOK_INSTAGRAM_CAPABILITIES.md](./docs/META_FACEBOOK_INSTAGRAM_CAPABILITIES.md)** | Facebook vs Instagram posts & ads |
+| **[MIGRATIONS.md](./MIGRATIONS.md)** | How the schema is applied and versioned |
 | **[INTEGRATIONS_SETUP.md](./INTEGRATIONS_SETUP.md)** | Connect GA, Meta, Shopify (OAuth, `.env`) |
 | **[PROJECT_PLAN.md](./PROJECT_PLAN.md)** | Vision, true north, roadmap |
 | **[TASKS_AND_TESTS.md](./TASKS_AND_TESTS.md)** | Milestones and manual test playbook |
@@ -33,12 +34,30 @@ Stack: **Supabase** (Postgres + Auth), **Express API**, **Next.js** web, **Docke
 2. **Project Settings → Database** → copy the **Connection string** (URI).
    - Use **Transaction pooler** (`:6543`) for the API — recommended.
    - Use **Direct** (`:5432`) only for one-off migrations if the pooler fails.
-3. Apply the schema (pick one):
+3. Apply the schema.
 
-   **Option A — SQL Editor**  
-   Paste contents of `supabase/migrations/20250520000000_initial_schema.sql` and run.
+   `supabase/migrations/` is the **single source of truth**. Every file is applied
+   at most once, in filename order, and recorded in a `schema_migrations` table.
+   There is no separate `schema.sql` — it was removed after drifting from the
+   migrations (see `MIGRATIONS.md`).
 
-   **Option B — Supabase CLI**
+   **Nothing to do by hand.** The API container runs the migration runner on boot,
+   so `docker compose up` brings a brand-new Supabase project fully up to date:
+
+   ```bash
+   docker compose up --build -d
+   docker compose logs api | grep '\[migrate\]'
+   ```
+
+   To run it yourself instead:
+
+   ```bash
+   cd backend && npm run db:migrate        # dev (tsx)
+   cd backend && npm run db:migrate:prod   # against a build
+   ```
+
+   Or use the Supabase CLI, which reads the same directory:
+
    ```bash
    brew install supabase/tap/supabase
    supabase login
@@ -46,11 +65,10 @@ Stack: **Supabase** (Postgres + Auth), **Express API**, **Next.js** web, **Docke
    supabase db push
    ```
 
-   **Option C — Apply pending migrations on a running API container** (if `config` column or `data_source` errors):
-   ```bash
-   docker cp supabase/migrations $(docker compose ps -q api):/tmp/migrations
-   docker cp backend/scripts/apply-pending-migrations.mjs $(docker compose ps -q api):/app/apply-pending-migrations.mjs
-   docker compose exec api node /app/apply-pending-migrations.mjs
+   To check what has been applied:
+
+   ```sql
+   SELECT version, applied_at FROM schema_migrations ORDER BY version;
    ```
 
 ## 2. Environment
@@ -76,6 +94,14 @@ Fill in:
 docker compose up --build -d
 ```
 
+Three services come up:
+
+| Service | Role | Notes |
+|---|---|---|
+| `api` | Express server + MCP bridges | Runs migrations on boot. Does **not** run the autopilot loop. |
+| `worker` | Autopilot cycle loop | Same image, `CONTAINER_ROLE=worker`. Claims work atomically, so replicas are safe. |
+| `web` | Next.js frontend | Proxies `/api/*` to `api`. |
+
 - **Frontend:** http://localhost:5000  
 - **API:** http://localhost:3001  
 - **Health:** http://localhost:3001/health  
@@ -85,8 +111,13 @@ docker compose up -d --build   # detached
 docker compose logs -f
 docker compose logs -f web
 docker compose logs -f api
+docker compose logs -f worker
 docker compose down
 ```
+
+> The api/worker image builds from the **repository root** (`context: .`,
+> `dockerfile: ./backend/Dockerfile`) because it needs `supabase/migrations`.
+> Building from inside `backend/` will fail.
 
 ### Local frontend dev (optional, without Docker)
 
@@ -100,11 +131,33 @@ npm run dev    # http://localhost:5000
 
 ```bash
 cd backend
-cp .env.example .env   # or use root .env with DATABASE_URL
 npm install
 npm run db:migrate
 npm run dev
 ```
+
+**Use the root `.env` only.** The backend resolves it automatically from any
+working directory (`src/lib/loadEnv.ts`), so there is no need for a second file
+in `backend/`.
+
+Creating `backend/.env` is supported but discouraged: it takes precedence, so a
+stale value there silently shadows the root file. That previously caused a
+`role "postgres" does not exist` failure when a leftover `backend/.env` pointed at
+a local Postgres. If both files exist you'll now see a warning naming them:
+
+```
+[env] multiple .env files loaded, earlier wins: …/backend/.env > …/.env
+```
+
+`ENCRYPTION_KEY` is the dangerous one to duplicate — it decrypts stored OAuth
+credentials, and a mismatch makes every connected integration unreadable.
+
+> **Migrations and the connection pooler.** Supabase's transaction pooler
+> (`:6543`) multiplexes statements across backend sessions, which is fine for the
+> API but not for session-scoped advisory locks. Prefer the session pooler
+> (`:5432`, same host) or a direct connection when migrating. The runner detects
+> `:6543` and falls back to transaction-scoped locks, so either works — you'll
+> just see a warning.
 
 ## 5. API usage
 
