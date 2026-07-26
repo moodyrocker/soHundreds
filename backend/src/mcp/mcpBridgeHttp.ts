@@ -5,6 +5,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { McpBridgePlatform } from '../lib/mcpBridgeToken.js';
 import { verifyMcpBridgeToken } from '../lib/mcpBridgeToken.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('mcp-bridge');
 
 /**
  * Live MCP bridge sessions.
@@ -62,7 +65,7 @@ function startSessionSweep(): void {
       void Promise.resolve(session.transport.close()).catch(() => {});
     }
     if (closed > 0) {
-      console.log(`[mcp-bridge] swept ${closed} idle session(s); ${sessions.size} live`);
+      log.info(`swept ${closed} idle session(s); ${sessions.size} live`);
     }
   }, SESSION_SWEEP_INTERVAL_MS);
   if (typeof sweepTimer.unref === 'function') sweepTimer.unref();
@@ -124,8 +127,8 @@ export function mountOrgMcpBridge(
           existing.organizationId !== verified.organizationId ||
           existing.platform !== verified.platform
         ) {
-          console.warn(
-            `[mcp-bridge:${platform}] rejected cross-tenant session reuse — ` +
+          log.warn(
+            `${platform}: rejected cross-tenant session reuse — ` +
               `token org=${verified.organizationId} attempted session owned by ` +
               `org=${existing.organizationId} (platform ${existing.platform})`
           );
@@ -193,7 +196,7 @@ export function mountOrgMcpBridge(
 
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      console.error(`[mcp-bridge:${platform}]`, err);
+      log.error(`${platform}: `, err);
       if (!res.headersSent) {
         res.status(500).json({
           jsonrpc: '2.0',

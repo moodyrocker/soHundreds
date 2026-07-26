@@ -1,5 +1,8 @@
 import type { MetaAdsCampaignState } from '../types/execution.js';
 import { MCPConnectionService } from './mcpConnectionService.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('meta-ads-campaign');
 
 const GRAPH_VERSION = process.env.META_GRAPH_API_VERSION ?? 'v21.0';
 
@@ -34,7 +37,7 @@ async function graphPost(
   if (!response.ok || data.error) {
     const err = data.error as { message?: string; error_user_msg?: string } | undefined;
     const message = err?.error_user_msg ?? err?.message ?? `Meta API error (${response.status})`;
-    console.warn('[meta-ads-campaign] POST failed:', path, message);
+    log.warn('POST failed:', path, message);
     throw new Error(message);
   }
   return data;
@@ -172,8 +175,8 @@ export class MetaAdsCampaignService {
             adProposal.imageUrl
           );
         } catch (err) {
-          console.warn(
-            '[meta-ads-campaign] image upload failed, creating link creative without hash:',
+          log.warn(
+            'image upload failed, creating link creative without hash:',
             err instanceof Error ? err.message : err
           );
         }

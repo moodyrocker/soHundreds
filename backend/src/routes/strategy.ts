@@ -6,6 +6,9 @@ import { StrategyService } from '../services/strategyService.js';
 import { LearningKnowledgeService } from '../services/learningKnowledgeService.js';
 import { ProgressDashboardService } from '../services/progressDashboardService.js';
 import type { TenantRequest } from '../middleware/tenant.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('strategy');
 
 const createSchema = z.object({
   goal: z.string().min(1),
@@ -51,7 +54,7 @@ export function createStrategyRouter(): Router {
       res.status(accepted ? 202 : 200).json({ strategy: pending, accepted });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'create failed';
-      console.error(`[strategy] create failed org=${tenant.id}:`, message);
+      log.error(`create failed org=${tenant.id}:`, message);
 
       if (/MCP server|communicating with MCP/i.test(message)) {
         res.status(502).json({
@@ -179,7 +182,7 @@ export function createStrategyRouter(): Router {
       res.status(accepted ? 202 : 200).json({ strategy: pending, accepted });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'refine failed';
-      console.error(`[strategy] refine failed org=${tenant.id}:`, message);
+      log.error(`refine failed org=${tenant.id}:`, message);
 
       if (message === 'Plan not found') {
         res.status(404).json({ error: message });

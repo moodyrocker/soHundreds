@@ -6,6 +6,9 @@ import { ExecutionService } from '../services/executionService.js';
 import { ExecutionOrchestratorService } from '../services/executionOrchestratorService.js';
 import { StrategyService } from '../services/strategyService.js';
 import type { TenantRequest } from '../middleware/tenant.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('agent-task');
 
 const previewSchema = z.object({
   strategyId: z.string().uuid(),
@@ -214,7 +217,7 @@ export function createExecutionRouter(): Router {
       const message = err instanceof Error ? err.message : 'Agent task failed';
       if (isZodError(err)) {
         const detail = formatZodIssues(err);
-        console.warn('[agent-task] validation failed:', detail, err.issues);
+        log.warn('validation failed:', detail, err.issues);
         res.status(400).json({
           error: `I couldn't read that chat turn (${detail}). Try again with a short line like: Instagram story — Cream of Dreams — clean lifestyle — Runway video.`,
           details: err.issues,
@@ -226,11 +229,11 @@ export function createExecutionRouter(): Router {
         return;
       }
       if (/Runway|moderation|timed out|task [a-z0-9-]+/i.test(message)) {
-        console.error('[agent-task] runway failed:', message);
+        log.error('runway failed:', message);
         res.status(422).json({ error: message });
         return;
       }
-      console.error('[agent-task] failed:', message);
+      log.error('failed:', message);
       next(err);
     }
   });

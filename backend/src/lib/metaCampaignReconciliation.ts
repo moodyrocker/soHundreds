@@ -1,5 +1,8 @@
 import { query } from '../database/connection.js';
 import { MCPConnectionService } from '../services/mcpConnectionService.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('meta-reconcile');
 
 const GRAPH_VERSION = process.env.META_GRAPH_API_VERSION ?? 'v21.0';
 
@@ -55,10 +58,8 @@ export async function reconcileMetaCampaignLibrary(organizationId: string): Prom
       archivedCount += 1;
     }
   } catch (err) {
-    console.warn(
-      '[meta-campaign-reconciliation] skipped this cycle:',
-      err instanceof Error ? err.message : err
-    );
+    log.warn(
+      'skipped this cycle:', err);
   }
 
   return archivedCount;

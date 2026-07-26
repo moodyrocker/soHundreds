@@ -2,6 +2,9 @@ import type { Request, Response, NextFunction } from 'express';
 import { query } from '../database/connection.js';
 import type { AuthRequest } from '../middleware/auth.js';
 import type { TenantRequest } from '../middleware/tenant.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('rate-limit');
 
 /**
  * Rate limiting.
@@ -99,10 +102,8 @@ function maybePrune(): void {
   if (now - lastPrune < PRUNE_INTERVAL_MS) return;
   lastPrune = now;
   void query('SELECT public.prune_rate_limit_counters($1)', [86_400]).catch((err) => {
-    console.warn(
-      '[rate-limit] prune skipped:',
-      err instanceof Error ? err.message : err
-    );
+    log.warn(
+      'prune skipped:', err);
   });
 }
 
@@ -133,8 +134,8 @@ export function dbLimiter(scope: LimitScope) {
       res.setHeader('X-RateLimit-Remaining', String(Math.max(0, max - count)));
 
       if (count > max) {
-        console.warn(
-          `[rate-limit] ${scope} exceeded by ${subject} (${count}/${max} in ${windowSecs}s)`
+        log.warn(
+          `${scope} exceeded by ${subject} (${count}/${max} in ${windowSecs}s)`
         );
         tooMany(res, scope, windowSecs);
         return;
@@ -143,8 +144,8 @@ export function dbLimiter(scope: LimitScope) {
       maybePrune();
       next();
     } catch (err) {
-      console.error(
-        `[rate-limit] ${scope} check failed for ${subject}, allowing request:`,
+      log.error(
+        `${scope} check failed for ${subject}, allowing request:`,
         err instanceof Error ? err.message : err
       );
       next();

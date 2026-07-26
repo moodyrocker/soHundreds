@@ -19,6 +19,9 @@ import { mountAllMcpBridges } from './mcp/mountMcpBridges.js';
 import { securityHeaders } from './lib/securityHeaders.js';
 import { dbLimiter, memoryLimiter } from './lib/rateLimit.js';
 import { attachRequestId, errorHandler } from './lib/errorHandler.js';
+import { logger } from './lib/logger.js';
+
+const log = logger('api');
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -90,8 +93,8 @@ tenantRoutes.use('/mcp', (req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const org = req.header('X-Organization-Id') ?? '-';
-    console.log(
-      `[mcp] ${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms) org=${org}`
+    log.info(
+      `${req.method} ${req.path} → ${res.statusCode} (${Date.now() - start}ms) org=${org}`
     );
   });
   next();
@@ -126,7 +129,7 @@ app.use('/api', tenantRoutes);
 app.use(errorHandler);
 
 app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
+  log.info(`Server listening on http://localhost:${port}`);
 
   // The autopilot loop runs in its own process (see workers/autopilotWorkerMain.ts
   // and the `worker` service in docker-compose.yml). The API does NOT start it:
@@ -136,17 +139,15 @@ app.listen(port, () => {
   // Set AUTOPILOT_CYCLE_WORKER=true to opt in — useful only for a single-process
   // local run with no worker container. Never set it on a scaled API.
   if (process.env.AUTOPILOT_CYCLE_WORKER?.trim().toLowerCase() === 'true') {
-    console.warn(
-      '[autopilot-cycle] AUTOPILOT_CYCLE_WORKER=true — running the agent loop inside the API process. ' +
+    log.warn(
+      'AUTOPILOT_CYCLE_WORKER=true — running the agent loop inside the API process. ' +
         'Safe only with a single API replica; use the dedicated worker service otherwise.'
     );
     void import('./workers/autopilotCycleWorker.js')
       .then(({ startAutopilotCycleWorker }) => startAutopilotCycleWorker())
       .catch((err) => {
-        console.error(
-          '[autopilot-cycle] failed to start worker:',
-          err instanceof Error ? err.message : err
-        );
+        log.error(
+          'failed to start worker:', err);
       });
   }
 });

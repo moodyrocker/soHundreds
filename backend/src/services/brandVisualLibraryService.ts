@@ -1,5 +1,8 @@
 import { resolvePublicImageUrl } from '../lib/resolvePublicImageUrl.js';
 import { query } from '../database/connection.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('brand-visuals');
 import type {
   BrandVisualAssetInput,
   BrandVisualAssetRecord,
@@ -84,8 +87,8 @@ export class BrandVisualLibraryService {
         );
         asset.imageUrl = fixed;
       } catch (err) {
-        console.warn(
-          '[brand-visuals] failed to resolve Unsplash page URL',
+        log.warn(
+          'failed to resolve Unsplash page URL',
           asset.id,
           err instanceof Error ? err.message : err
         );

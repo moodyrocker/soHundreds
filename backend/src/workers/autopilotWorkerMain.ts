@@ -2,6 +2,9 @@
 import '../lib/loadEnv.js';
 import { pool } from '../database/connection.js';
 import { INSTANCE_ID } from '../lib/workerIdentity.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('autopilot-worker');
 import {
   startAutopilotCycleWorker,
   stopAutopilotCycleWorker,
@@ -35,7 +38,7 @@ let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[autopilot-worker] ${signal} received — shutting down`);
+  log.info(`${signal} received — shutting down`);
 
   // Releases claims held by this instance so a rolling deploy does not leave
   // strategies parked for the full stale window. In-flight cycles finish on
@@ -45,13 +48,11 @@ async function shutdown(signal: string): Promise<void> {
   try {
     await pool.end();
   } catch (err) {
-    console.error(
-      '[autopilot-worker] error closing pool:',
-      err instanceof Error ? err.message : err
-    );
+    log.error(
+      'error closing pool:', err);
   }
 
-  console.log('[autopilot-worker] shutdown complete');
+  log.info('shutdown complete');
   process.exit(0);
 }
 
@@ -59,17 +60,17 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
 process.on('unhandledRejection', (reason) => {
-  console.error('[autopilot-worker] unhandled rejection:', reason);
+  log.error('unhandled rejection:', reason);
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('[autopilot-worker] uncaught exception:', err);
+  log.error('uncaught exception:', err);
   // Exit and let the container restart policy give us a clean process. Claims
   // held by this instance are recovered by the reaper on the next tick.
   process.exit(1);
 });
 
-console.log(`[autopilot-worker] starting — instance ${INSTANCE_ID}`);
+log.info(`starting — instance ${INSTANCE_ID}`);
 
 // The worker process exists solely to run the loop, so ignore
 // AUTOPILOT_CYCLE_WORKER here — that flag is what keeps the API from running it.

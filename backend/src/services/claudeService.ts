@@ -25,6 +25,9 @@ import { parseAgentTaskJson, type ParsedAgentTask } from '../utils/parseAgentTas
 import { randomUUID } from 'node:crypto';
 import { sanitizeModelStrings } from '../utils/stripModelMarkup.js';
 import { fetchWebsiteText } from '../lib/fetchWebsiteText.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('claude');
 
 const DEFAULT_MODEL =
   process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514';
@@ -95,8 +98,8 @@ export class ClaudeService {
     try {
       return await this.requestPlanJson(prompt, useWebSearch);
     } catch (firstErr) {
-      console.warn(
-        '[claude] plan generation failed, retrying without web search:',
+      log.warn(
+        'plan generation failed, retrying without web search:',
         firstErr instanceof Error ? firstErr.message : firstErr
       );
       return await this.requestPlanJson(
@@ -217,8 +220,8 @@ ${this.contentPublishPlanNotes()}
     try {
       return await this.requestCheckupJson(prompt, useWebSearch);
     } catch (firstErr) {
-      console.warn(
-        '[claude] check-up failed, retrying without web search:',
+      log.warn(
+        'check-up failed, retrying without web search:',
         firstErr instanceof Error ? firstErr.message : firstErr
       );
       return await this.requestCheckupJson(
@@ -1100,10 +1103,8 @@ Rules:
         return parseShopifyPageJson(text);
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] shopify page JSON parse failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'shopify page JSON parse failed:', err);
       }
     }
 
@@ -1172,10 +1173,8 @@ Rules:
         return parseShopifyBlogJson(text);
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] shopify blog JSON parse failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'shopify blog JSON parse failed:', err);
       }
     }
 
@@ -1338,15 +1337,13 @@ Rules:
         return { ...parsed, actionId };
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] agent task JSON parse failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'agent task JSON parse failed:', err);
       }
     }
 
     // Soft fallback — never surface cryptic Zod errors to the chat UI
-    console.error('[claude] agent task exhausted retries:', lastErr);
+    log.error('agent task exhausted retries:', lastErr);
     return {
       reply:
         'I understood you, but had trouble structuring the task. Reply with one line like: “Instagram story, Cream of Dreams, clean lifestyle, Runway video” and I’ll run it.',
@@ -1452,10 +1449,8 @@ Rules:
         return parseGoogleAdsCampaignJson(text);
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] google ads campaign JSON parse failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'google ads campaign JSON parse failed:', err);
       }
     }
 
@@ -1556,10 +1551,8 @@ Rules:
         return parseMetaAdsCampaignJson(text);
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] meta ads campaign JSON parse failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'meta ads campaign JSON parse failed:', err);
       }
     }
 
@@ -1634,10 +1627,8 @@ Rules:
         return parseMailchimpSequenceJson(text);
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] mailchimp sequence JSON parse failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'mailchimp sequence JSON parse failed:', err);
       }
     }
 
@@ -1677,7 +1668,7 @@ Rules:
     const website = page?.finalUrl || websiteRaw;
 
     if (websiteRaw && !page) {
-      console.warn('[claude] website fetch returned no text for', websiteRaw);
+      log.warn('website fetch returned no text for', websiteRaw);
     }
 
     const siteBlock = page
@@ -1768,10 +1759,8 @@ Rules:
         };
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] business profile draft failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'business profile draft failed:', err);
       }
     }
 
@@ -1868,10 +1857,8 @@ Rules:
         };
       } catch (err) {
         lastErr = err;
-        console.warn(
-          '[claude] runway prompt draft failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'runway prompt draft failed:', err);
       }
     }
 

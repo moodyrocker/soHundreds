@@ -16,6 +16,9 @@ import { decrypt, encrypt } from '../utils/encryption.js';
 import { getMcpDefinition } from '../lib/mcpRegistry.js';
 import { isGoogleAdsEnabled } from '../lib/googleFeatureFlags.js';
 import { mcpBridgePublicUrl } from '../lib/mcpBridgeToken.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('mcp-connection');
 import {
   resolveInstagramBusinessAccount,
   type InstagramContext,
@@ -765,10 +768,8 @@ export class MCPConnectionService {
           graphHost: 'https://graph.instagram.com',
         };
       } catch (err) {
-        console.warn(
-          '[instagram] Business Login token invalid:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'Business Login token invalid:', err);
         return null;
       }
     }
@@ -790,10 +791,8 @@ export class MCPConnectionService {
           await this.mergeMetaConfig(organizationId, { pageId });
         }
       } catch (err) {
-        console.warn(
-          '[instagram] Meta page lookup failed:',
-          err instanceof Error ? err.message : err
-        );
+        log.warn(
+          'Meta page lookup failed:', err);
         return null;
       }
     }
@@ -818,10 +817,8 @@ export class MCPConnectionService {
         graphHost: 'https://graph.facebook.com',
       };
     } catch (err) {
-      console.warn(
-        '[instagram] Meta fallback IG lookup failed:',
-        err instanceof Error ? err.message : err
-      );
+      log.warn(
+        'Meta fallback IG lookup failed:', err);
       return null;
     }
   }
@@ -831,10 +828,8 @@ export class MCPConnectionService {
       const ctx = await this.getInstagramContext(organizationId);
       return ctx !== null;
     } catch (err) {
-      console.warn(
-        '[instagram] readiness check failed:',
-        err instanceof Error ? err.message : err
-      );
+      log.warn(
+        'readiness check failed:', err);
       return false;
     }
   }
@@ -856,7 +851,7 @@ export class MCPConnectionService {
       const ctx = await this.getCanvaContext(organizationId);
       return ctx !== null;
     } catch (err) {
-      console.warn('[canva] readiness check failed:', err instanceof Error ? err.message : err);
+      log.warn('readiness check failed:', err);
       return false;
     }
   }
@@ -921,10 +916,8 @@ export class MCPConnectionService {
       const ctx = await this.getMailchimpContext(organizationId);
       return Boolean(ctx?.defaultListId);
     } catch (err) {
-      console.warn(
-        '[mailchimp] readiness check failed:',
-        err instanceof Error ? err.message : err
-      );
+      log.warn(
+        'readiness check failed:', err);
       return false;
     }
   }
@@ -1254,8 +1247,8 @@ export class MCPConnectionService {
 
     const grantedScopes = data.scope?.trim() ?? '';
     if (!grantedScopes.includes('read_products') || !grantedScopes.includes('read_orders')) {
-      console.warn(
-        `[shopify-oauth] token missing required scopes for ${shopDomain}. granted="${grantedScopes}" expected="${shopifyScopes()}"`
+      log.warn(
+        `token missing required scopes for ${shopDomain}. granted="${grantedScopes}" expected="${shopifyScopes()}"`
       );
     }
 

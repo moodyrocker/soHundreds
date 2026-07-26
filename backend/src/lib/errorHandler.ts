@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import type { Request, Response, NextFunction } from 'express';
 import type { TenantRequest } from '../middleware/tenant.js';
+import { logger, withLogContext } from './logger.js';
+
+const log = logger('http');
 
 /**
  * Error handling and request correlation.
@@ -25,7 +28,11 @@ export interface RequestWithId extends Request {
   requestId: string;
 }
 
-/** Assigns an id to every request and echoes it, so a client can quote it. */
+/**
+ * Assigns an id to every request, echoes it, and opens a log context so every
+ * line produced anywhere beneath this request carries the id without the id
+ * having to be threaded through call signatures.
+ */
 export function attachRequestId(req: Request, res: Response, next: NextFunction): void {
   // Honour an inbound id so a trace survives the Next.js proxy hop, but bound
   // the length — it goes into logs and a response header.
@@ -34,7 +41,10 @@ export function attachRequestId(req: Request, res: Response, next: NextFunction)
     inbound && inbound.length <= 64 && /^[\w.-]+$/.test(inbound) ? inbound : randomUUID();
   (req as RequestWithId).requestId = id;
   res.setHeader('X-Request-Id', id);
-  next();
+
+  // The organization is not known yet — tenantMiddleware resolves it later and
+  // calls addLogContext, which mutates this same store.
+  withLogContext({ requestId: id }, () => next());
 }
 
 /**
@@ -87,13 +97,14 @@ export function errorHandler(
   const tenant = (req as TenantRequest).tenant;
   const message = err instanceof Error ? err.message : String(err);
 
-  // Full detail server-side only, keyed by the id the caller was given.
-  console.error(
-    `[error] id=${requestId} ${req.method} ${req.originalUrl}` +
-      (tenant?.id ? ` org=${tenant.id}` : '') +
-      `\n        ${err?.name ?? 'Error'}: ${message}` +
-      (err?.stack ? `\n${err.stack.split('\n').slice(1, 6).join('\n')}` : '')
-  );
+  // Full detail server-side only. requestId and organizationId come from the log
+  // context, so they appear as queryable fields rather than embedded in the text.
+  log.error(`${req.method} ${req.originalUrl} failed`, {
+    method: req.method,
+    path: req.originalUrl,
+    err,
+    ...(tenant?.id ? { organizationId: tenant.id } : {}),
+  });
 
   if (res.headersSent) return;
 

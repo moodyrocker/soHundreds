@@ -1,6 +1,9 @@
 import { jsonrepair } from 'jsonrepair';
 import { planDocumentSchema, type PlanDocument } from '../types/plan.js';
 import { sanitizeModelStrings, stripWebSearchCitations } from './stripModelMarkup.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('parse-plan-json');
 
 /** Normalize common model output that breaks JSON.parse before repair. */
 function prepareModelJsonString(jsonStr: string): string {
@@ -18,7 +21,7 @@ function parseJsonLenient(jsonStr: string): unknown {
     try {
       const repaired = jsonrepair(prepared);
       const parsed = JSON.parse(repaired);
-      console.warn('[parsePlanJson] repaired malformed model JSON');
+      log.warn('[parsePlanJson] repaired malformed model JSON');
       return parsed;
     } catch {
       const msg = firstErr instanceof Error ? firstErr.message : 'invalid JSON';

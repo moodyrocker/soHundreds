@@ -66,6 +66,9 @@ import { BrandVisualLibraryService } from './brandVisualLibraryService.js';
 import { AdCampaignLibraryService } from './adCampaignLibraryService.js';
 import { isUnsplashConfigured } from '../lib/unsplashClient.js';
 import { shopStorefrontUrl } from '../lib/shopStorefrontUrl.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('execution');
 
 type ExecutionRow = {
   id: string;
@@ -1753,8 +1756,8 @@ export class ExecutionService {
           }
         );
       } catch (creativeErr) {
-        console.warn(
-          '[execution] Meta creative prep skipped:',
+        log.warn(
+          'Meta creative prep skipped:',
           creativeErr instanceof Error ? creativeErr.message : creativeErr
         );
       }
@@ -1785,8 +1788,8 @@ export class ExecutionService {
           channel: 'meta',
         });
       } catch (libErr) {
-        console.warn(
-          '[execution] failed to save Meta campaign to ads library:',
+        log.warn(
+          'failed to save Meta campaign to ads library:',
           libErr instanceof Error ? libErr.message : libErr
         );
       }
@@ -2631,8 +2634,8 @@ export class ExecutionService {
         prefer: 'auto',
       });
     } catch (creativeErr) {
-      console.warn(
-        '[execution] Meta creative enrichment at preview skipped:',
+      log.warn(
+        'Meta creative enrichment at preview skipped:',
         creativeErr instanceof Error ? creativeErr.message : creativeErr
       );
     }
@@ -2671,8 +2674,8 @@ export class ExecutionService {
         channel: 'meta',
       });
     } catch (libErr) {
-      console.warn(
-        '[execution] failed to save Meta draft to ads library:',
+      log.warn(
+        'failed to save Meta draft to ads library:',
         libErr instanceof Error ? libErr.message : libErr
       );
     }

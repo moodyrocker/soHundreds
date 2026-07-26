@@ -2,6 +2,9 @@ import { MCPConnectionService } from './mcpConnectionService.js';
 import type { SnapshotFetchResult, SnapshotProbeResult } from '../types/snapshot.js';
 import { idleProbe, probeFromFetch } from '../types/snapshot.js';
 import { gaSnapshotUserMessage } from '../utils/snapshotErrors.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('ga-snapshot');
 
 export interface AnalyticsSnapshot {
   propertyId: string;
@@ -96,8 +99,8 @@ export class GoogleAnalyticsSnapshotService {
     ]);
 
     if (!overview.ok) {
-      console.warn(
-        '[ga-snapshot] overview runReport failed:',
+      log.warn(
+        'overview runReport failed:',
         overview.status,
         overview.body.slice(0, 300)
       );

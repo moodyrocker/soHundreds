@@ -15,6 +15,9 @@ import {
 } from './businessProfileService.js';
 import type { StrategyDataSource } from './strategyService.js';
 import { MarketIntelService } from './marketIntel/marketIntelService.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('checkup');
 
 export type CheckupRecord = {
   id: string;
@@ -172,7 +175,7 @@ export class CheckupService {
       [organizationId, dataSource, JSON.stringify(report)]
     );
 
-    console.log(`[checkup] created id=${result.rows[0].id} org=${organizationId}`);
+    log.info(`created id=${result.rows[0].id} org=${organizationId}`);
     return mapRow(result.rows[0]);
   }
 

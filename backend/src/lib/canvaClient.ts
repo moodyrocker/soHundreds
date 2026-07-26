@@ -1,3 +1,6 @@
+import { logger } from '../lib/logger.js';
+
+const log = logger('canva');
 const CANVA_API_BASE = 'https://api.canva.com/rest/v1';
 
 export type CanvaDesign = {
@@ -133,7 +136,7 @@ export async function canvaExportDesignUrl(
     if (job.status === 'success') {
       const url = firstExportDownloadUrl(job);
       if (!url) {
-        console.warn('[canva] export success without usable url:', JSON.stringify(job).slice(0, 500));
+        log.warn('export success without usable url:', JSON.stringify(job).slice(0, 500));
         throw new Error('Canva export succeeded but no download URL was returned');
       }
       return url;

@@ -15,6 +15,9 @@ import { previewRecipePromptWithRunway } from './runwayAssistVideoService.js';
 import { ContentRecipeKnowledgeService } from './contentRecipeKnowledgeService.js';
 import { isRunwayConfigured } from '../lib/runwayClient.js';
 import { evaluateMetaAdsCreateThrottle } from '../lib/paidAdThrottle.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('ad-campaigns');
 
 type CampaignRow = {
   id: string;
@@ -555,10 +558,8 @@ export class AdCampaignLibraryService {
             imageSource = 'canva';
           }
         } catch (err) {
-          console.warn(
-            '[ad-campaigns] Canva creative skipped:',
-            err instanceof Error ? err.message : err
-          );
+          log.warn(
+            'Canva creative skipped:', err);
         }
       }
 
@@ -599,10 +600,8 @@ export class AdCampaignLibraryService {
           imageUrl = preview.imageUrl;
           imageSource = 'runway';
         } catch (err) {
-          console.warn(
-            '[ad-campaigns] Runway creative skipped:',
-            err instanceof Error ? err.message : err
-          );
+          log.warn(
+            'Runway creative skipped:', err);
         }
       }
 

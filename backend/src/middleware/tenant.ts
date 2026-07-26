@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { query } from '../database/connection.js';
+import { addLogContext } from '../lib/logger.js';
 import type { AuthRequest } from './auth.js';
 
 export interface TenantRequest extends AuthRequest {
@@ -50,6 +51,11 @@ export async function tenantMiddleware(
       name: row.name,
       role: row.role as TenantRequest['tenant']['role'],
     };
+
+    // Every log line for the rest of this request is now attributable to an
+    // organization and user, without passing them down through call signatures.
+    addLogContext({ organizationId: row.id, userId: authReq.user.id });
+
     next();
   } catch (err) {
     next(err);

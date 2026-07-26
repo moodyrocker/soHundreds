@@ -1,5 +1,8 @@
 import { query } from '../database/connection.js';
 import { RUNWAY_OFFICIAL_RECIPES } from '../lib/runwayOfficialRecipes.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('content-recipes');
 import type {
   ContentRecipeInput,
   ContentRecipeMedium,
@@ -121,7 +124,7 @@ export class ContentRecipeKnowledgeService {
       } catch (err) {
         // Concurrent seed / unique race — safe to ignore
         if (!(err instanceof Error) || !/unique|duplicate/i.test(err.message)) {
-          console.warn('[content-recipes] seed failed:', recipe.slug, err);
+          log.warn('seed failed:', recipe.slug, err);
         }
       }
     }
@@ -177,7 +180,7 @@ export class ContentRecipeKnowledgeService {
           negativePrompt: nextNegative,
         });
       } catch (err) {
-        console.warn('[content-recipes] @product upgrade failed:', recipe.slug, err);
+        log.warn('@product upgrade failed:', recipe.slug, err);
       }
     }
   }

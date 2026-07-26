@@ -2,6 +2,9 @@ import { MCPConnectionService } from './mcpConnectionService.js';
 import type { SnapshotFetchResult, SnapshotProbeResult } from '../types/snapshot.js';
 import { idleProbe, probeFromFetch } from '../types/snapshot.js';
 import { metaSnapshotUserMessage } from '../utils/snapshotErrors.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('meta-ads-snapshot');
 
 const GRAPH_VERSION = process.env.META_GRAPH_API_VERSION ?? 'v21.0';
 
@@ -65,7 +68,7 @@ export class MetaAdsSnapshotService {
 
     if (!response.ok) {
       const err = await response.text();
-      console.warn('[meta-ads-snapshot] insights failed:', response.status, err.slice(0, 400));
+      log.warn('insights failed:', response.status, err.slice(0, 400));
       return {
         ok: false,
         error: err.slice(0, 400),

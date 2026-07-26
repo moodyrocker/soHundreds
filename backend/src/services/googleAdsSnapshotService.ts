@@ -3,6 +3,9 @@ import { MCPConnectionService } from './mcpConnectionService.js';
 import type { SnapshotFetchResult, SnapshotProbeResult } from '../types/snapshot.js';
 import { idleProbe, probeFromFetch } from '../types/snapshot.js';
 import { parseGoogleAdsError } from '../utils/parseGoogleAdsError.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('google-ads-snapshot');
 
 const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? 'v21';
 
@@ -102,7 +105,7 @@ export class GoogleAdsSnapshotService {
     if (!response.ok) {
       const err = await response.text();
       const parsed = parseGoogleAdsError(err, response.status);
-      console.warn('[google-ads-snapshot] search failed:', response.status, err.slice(0, 400));
+      log.warn('search failed:', response.status, err.slice(0, 400));
       return {
         ok: false,
         error: parsed.message,

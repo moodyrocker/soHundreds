@@ -29,6 +29,9 @@ import {
   formatMetaAdsThrottleForPrompt,
 } from '../lib/paidAdThrottle.js';
 import { listLoadedSources, runPlanWorkers } from '../workers/runWorkers.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('strategy');
 
 export type StrategyDataSource =
   | 'analytics'
@@ -187,7 +190,7 @@ export class StrategyService {
         const snapshot = await fetcher();
         return snapshot?.text;
       } catch (err) {
-        console.warn(`[strategy] ${label} snapshot failed:`, err instanceof Error ? err.message : err);
+        log.warn(`${label} snapshot failed:`, err);
         return undefined;
       }
     };
@@ -245,7 +248,7 @@ export class StrategyService {
   async startCreate(organizationId: string, request: StrategyRequest): Promise<StrategyRecord> {
     const existing = await this.getGenerating(organizationId);
     if (existing) {
-      console.log(`[strategy] reusing generating id=${existing.id} org=${organizationId}`);
+      log.info(`reusing generating id=${existing.id} org=${organizationId}`);
       return existing;
     }
 
@@ -260,7 +263,7 @@ export class StrategyService {
     );
 
     const pending = mapRow(result.rows[0]);
-    console.log(`[strategy] queued id=${pending.id} org=${organizationId}`);
+    log.info(`queued id=${pending.id} org=${organizationId}`);
     return pending;
   }
 
@@ -274,7 +277,7 @@ export class StrategyService {
   ): Promise<StrategyRecord> {
     const existing = await this.getGenerating(organizationId);
     if (existing) {
-      console.log(`[strategy] refine reusing generating id=${existing.id} org=${organizationId}`);
+      log.info(`refine reusing generating id=${existing.id} org=${organizationId}`);
       return existing;
     }
 
@@ -300,7 +303,7 @@ export class StrategyService {
     );
 
     const pending = mapRow(result.rows[0]);
-    console.log(`[strategy] refine queued id=${pending.id} parent=${parentStrategyId} org=${organizationId}`);
+    log.info(`refine queued id=${pending.id} parent=${parentStrategyId} org=${organizationId}`);
     return pending;
   }
 
@@ -319,7 +322,7 @@ export class StrategyService {
     strategyId: string,
     request: StrategyRequest
   ): Promise<void> {
-    console.log(`[strategy] generate start id=${strategyId} org=${organizationId}`);
+    log.info(`generate start id=${strategyId} org=${organizationId}`);
 
     try {
       const row = await query<StrategyRow>(
@@ -327,7 +330,7 @@ export class StrategyService {
         [strategyId, organizationId]
       );
       if (!row.rows[0] || row.rows[0].status !== 'generating') {
-        console.log(`[strategy] skip id=${strategyId} (not generating)`);
+        log.info(`skip id=${strategyId} (not generating)`);
         return;
       }
 
@@ -414,7 +417,7 @@ export class StrategyService {
         },
       });
 
-      console.log(`[strategy] generate ok id=${strategyId} org=${organizationId}`);
+      log.info(`generate ok id=${strategyId} org=${organizationId}`);
 
       if (learningCtx.applied.length) {
         const activity = new AutopilotActivityService();
@@ -434,7 +437,7 @@ export class StrategyService {
       void this.runAutopilotCurrentWeek(organizationId, strategyId);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Plan generation failed';
-      console.error(`[strategy] generate failed id=${strategyId} org=${organizationId}:`, message);
+      log.error(`generate failed id=${strategyId} org=${organizationId}:`, message);
 
       await query(
         `UPDATE strategies SET
@@ -461,19 +464,19 @@ export class StrategyService {
       const week = strategy.currentWeek;
       const execution = new ExecutionService();
       const orchestrator = new ExecutionOrchestratorService();
-      console.log(`[autopilot] sequential week ${week} strategy=${strategyId}`);
+      log.info(`sequential week ${week} strategy=${strategyId}`);
 
       // Preflight only — live data pull + reasoning, no parallel execution.
       await execution.runWeekAutopilot(organizationId, strategyId, week, false, false);
 
       const snapshot = await orchestrator.runUntilBlocked(organizationId, strategyId, week);
       const confirmed = snapshot.actions.filter((a) => a.runStatus === 'confirmed').length;
-      console.log(
-        `[autopilot] week ${week} sequential strategy=${strategyId} confirmed=${confirmed}/${snapshot.actions.length} block=${snapshot.block?.status ?? 'idle'}`
+      log.info(
+        `week ${week} sequential strategy=${strategyId} confirmed=${confirmed}/${snapshot.actions.length} block=${snapshot.block?.status ?? 'idle'}`
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Autopilot failed';
-      console.error(`[autopilot] failed strategy=${strategyId}:`, message);
+      log.error(`failed strategy=${strategyId}:`, message);
     }
   }
 
@@ -594,7 +597,7 @@ export class StrategyService {
 
     const { progress } = await this.evaluateCurrentWeek(organizationId, strategyId);
     if (progress.goalMet) {
-      console.log(`[autopilot] goal met strategy=${strategyId}`);
+      log.info(`goal met strategy=${strategyId}`);
       return;
     }
 
@@ -728,12 +731,12 @@ export class StrategyService {
           `UPDATE strategies SET goal_status = 'met', updated_at = NOW() WHERE id = $1 AND organization_id = $2`,
           [strategyId, organizationId]
         );
-        console.log(`[strategy] goal met strategy=${strategyId}`);
+        log.info(`goal met strategy=${strategyId}`);
         return;
       }
 
       if (!result.week) {
-        console.warn(`[strategy] next week ${nextWeek} empty for strategy=${strategyId}`);
+        log.warn(`next week ${nextWeek} empty for strategy=${strategyId}`);
         return;
       }
 
@@ -792,11 +795,11 @@ export class StrategyService {
         });
       }
 
-      console.log(`[strategy] appended week ${nextWeek} strategy=${strategyId}`);
+      log.info(`appended week ${nextWeek} strategy=${strategyId}`);
       await this.runAutopilotCurrentWeek(organizationId, strategyId);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Next week generation failed';
-      console.error(`[strategy] next week failed strategy=${strategyId} week=${nextWeek}:`, message);
+      log.error(`next week failed strategy=${strategyId} week=${nextWeek}:`, message);
     } finally {
       runningJobs.delete(`${strategyId}:week${nextWeek}`);
     }

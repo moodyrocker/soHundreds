@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { query } from '../database/connection.js';
 import {
   getAutopilotCycleTickMinutes,
   isAutopilotCycleWorkerEnabled,
 } from '../lib/autopilotCycleConfig.js';
+import { logger, errMessage, withLogContext } from '../lib/logger.js';
 import { getPaceProfile } from '../lib/autopilotPaceConfig.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import {
@@ -17,6 +19,8 @@ import { ExecutionService } from '../services/executionService.js';
 import { StrategyService } from '../services/strategyService.js';
 import { GoalProgressService } from '../services/goalProgressService.js';
 import { getAutopilotPace } from '../services/autopilotService.js';
+
+const log = logger('autopilot-cycle');
 
 type DueStrategyRow = {
   id: string;
@@ -177,8 +181,8 @@ async function reapStaleClaims(): Promise<number> {
 
   const total = (strategies.rowCount ?? 0) + (executions.rowCount ?? 0);
   if (total > 0) {
-    console.warn(
-      `[autopilot-cycle] reaped ${strategies.rowCount ?? 0} stale strategy claim(s) and ` +
+    log.warn(
+      `reaped ${strategies.rowCount ?? 0} stale strategy claim(s) and ` +
         `${executions.rowCount ?? 0} orphaned execution(s) older than ${staleMinutes}m`
     );
   }
@@ -206,6 +210,21 @@ export async function runScheduledCycleForStrategy(
   strategyId: string,
   alreadyClaimed = false
 ): Promise<void> {
+  // One cycle spans many awaits across several services. Opening a log context
+  // here means every line produced anywhere beneath it carries the same cycleId,
+  // organizationId and strategyId — so "show me everything that happened in the
+  // cycle that touched this ad account" becomes a single filter.
+  return withLogContext(
+    { cycleId: randomUUID(), organizationId, strategyId },
+    () => runCycleInner(organizationId, strategyId, alreadyClaimed)
+  );
+}
+
+async function runCycleInner(
+  organizationId: string,
+  strategyId: string,
+  alreadyClaimed: boolean
+): Promise<void> {
   if (!alreadyClaimed) {
     const claimed = await query(
       `UPDATE strategies
@@ -219,8 +238,8 @@ export async function runScheduledCycleForStrategy(
       [strategyId, organizationId, INSTANCE_ID, String(getClaimStaleMinutes())]
     );
     if (claimed.rowCount === 0) {
-      console.log(
-        `[autopilot-cycle] strategy=${strategyId} already claimed by another worker — skipping`
+      log.info(
+        `strategy=${strategyId} already claimed by another worker — skipping`
       );
       return;
     }
@@ -234,14 +253,34 @@ export async function runScheduledCycleForStrategy(
   const pace = await getAutopilotPace(organizationId);
   const paceProfile = getPaceProfile(pace);
 
+  const startedAt = Date.now();
+
   try {
     const strategy = await strategies.getById(organizationId, strategyId);
     if (!strategy || strategy.status !== 'active' || strategy.goalStatus !== 'active') {
+      log.debug('skipped — strategy is not active', {
+        status: strategy?.status,
+        goalStatus: strategy?.goalStatus,
+      });
       return;
     }
-    if (!strategy.plan) return;
+    if (!strategy.plan) {
+      log.debug('skipped — strategy has no plan');
+      return;
+    }
 
     const week = strategy.currentWeek;
+
+    // A successful cycle previously left no trace in the logs at all — progress
+    // was recorded only as autopilot_activity rows. That is the right surface for
+    // the user-facing Activity feed, but it means an operator debugging a
+    // misfire has nothing to correlate against. These lines carry the cycleId, so
+    // the whole pass can be pulled back with one filter.
+    log.info(`cycle start — week ${week}, ${paceProfile.label} pace`, {
+      week,
+      pace,
+      cycleMinutes: paceProfile.cycleMinutes,
+    });
 
     await activity.log({
       organizationId,
@@ -412,9 +451,21 @@ export async function runScheduledCycleForStrategy(
         status: 'info',
       });
     }
+
+    log.info(
+      `cycle done — ${confirmed} confirmed, ${pending} open, ${parkedCount} parked`,
+      {
+        week: finishedWeek,
+        confirmed,
+        open: pending,
+        parkedAds: parkedCount,
+        block: snapshot.block?.status ?? 'idle',
+        durationMs: Date.now() - startedAt,
+      }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Scheduled cycle failed';
-    console.error(`[autopilot-cycle] strategy=${strategyId}:`, message);
+    log.error('cycle failed:', err, { durationMs: Date.now() - startedAt });
     try {
       await activity.log({
         organizationId,
@@ -433,10 +484,8 @@ export async function runScheduledCycleForStrategy(
     try {
       await releaseClaim(organizationId, strategyId);
     } catch (err) {
-      console.error(
-        `[autopilot-cycle] failed to release claim for strategy=${strategyId}:`,
-        err instanceof Error ? err.message : err
-      );
+      log.error(
+        `failed to release claim for strategy=${strategyId}:`, err);
     }
   }
 }
@@ -458,8 +507,8 @@ export async function runDueAutopilotCycles(): Promise<number> {
   if (claimed.length === 0) return 0;
 
   const concurrency = getCycleConcurrency();
-  console.log(
-    `[autopilot-cycle] claimed ${claimed.length} strateg${
+  log.info(
+    `claimed ${claimed.length} strateg${
       claimed.length === 1 ? 'y' : 'ies'
     } (concurrency ${concurrency}, instance ${INSTANCE_ID})`
   );
@@ -472,8 +521,8 @@ export async function runDueAutopilotCycles(): Promise<number> {
   // so anything surfacing here is unexpected. Report it without failing the tick.
   for (const result of results) {
     if (result.error) {
-      console.error(
-        `[autopilot-cycle] unhandled error for strategy=${result.item.id}:`,
+      log.error(
+        `unhandled error for strategy=${result.item.id}:`,
         result.error instanceof Error ? result.error.message : result.error
       );
     }
@@ -484,7 +533,7 @@ export async function runDueAutopilotCycles(): Promise<number> {
 
 export function startAutopilotCycleWorker(): void {
   if (!isAutopilotCycleWorkerEnabled()) {
-    console.log('[autopilot-cycle] worker disabled (AUTOPILOT_CYCLE_WORKER=false)');
+    log.info('worker disabled (AUTOPILOT_CYCLE_WORKER=false)');
     return;
   }
   if (tickTimer) return;
@@ -497,17 +546,17 @@ export function startAutopilotCycleWorker(): void {
     try {
       const n = await runDueAutopilotCycles();
       if (n > 0) {
-        console.log(`[autopilot-cycle] processed ${n} due strateg${n === 1 ? 'y' : 'ies'}`);
+        log.info(`processed ${n} due strateg${n === 1 ? 'y' : 'ies'}`);
       }
     } catch (err) {
-      console.error('[autopilot-cycle] tick failed:', err instanceof Error ? err.message : err);
+      log.error('tick failed:', err);
     } finally {
       tickInFlight = false;
     }
   };
 
-  console.log(
-    `[autopilot-cycle] agentic worker on — instance ${INSTANCE_ID}, ` +
+  log.info(
+    `agentic worker on — instance ${INSTANCE_ID}, ` +
       `cadence from org pace (normal 60m / high 30m / intense 15m), ` +
       `wake every ${getAutopilotCycleTickMinutes()}m, ` +
       `batch ${getCycleBatchSize()} @ concurrency ${getCycleConcurrency()}, ` +
@@ -522,10 +571,8 @@ export function startAutopilotCycleWorker(): void {
        AND status = 'active'
        AND COALESCE(goal_status, 'active') = 'active'`
   ).catch((err) => {
-    console.warn(
-      '[autopilot-cycle] pause clamp skipped:',
-      err instanceof Error ? err.message : err
-    );
+    log.warn(
+      'pause clamp skipped:', err);
   });
 
   setTimeout(() => void tick(), 15_000);
@@ -553,12 +600,10 @@ export async function stopAutopilotCycleWorker(): Promise<void> {
       [INSTANCE_ID]
     );
     if ((released.rowCount ?? 0) > 0) {
-      console.log(`[autopilot-cycle] released ${released.rowCount} claim(s) on shutdown`);
+      log.info(`released ${released.rowCount} claim(s) on shutdown`);
     }
   } catch (err) {
-    console.error(
-      '[autopilot-cycle] failed to release claims on shutdown:',
-      err instanceof Error ? err.message : err
-    );
+    log.error(
+      'failed to release claims on shutdown:', err);
   }
 }

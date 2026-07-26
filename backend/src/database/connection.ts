@@ -2,6 +2,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { logger } from '../lib/logger.js';
+
+const log = logger('db');
 
 const { Pool } = pg;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -70,8 +73,8 @@ function getPoolConfig(): pg.PoolConfig {
   if (!useSsl) return config;
 
   if (process.env.DATABASE_SSL_INSECURE?.trim().toLowerCase() === 'true') {
-    console.warn(
-      '[db] DATABASE_SSL_INSECURE=true — TLS certificate verification is DISABLED. ' +
+    log.warn(
+      'DATABASE_SSL_INSECURE=true — TLS certificate verification is DISABLED. ' +
         'The connection is encrypted but unauthenticated, so it can be intercepted. ' +
         'Unset this as soon as the underlying certificate problem is fixed.'
     );
@@ -82,7 +85,7 @@ function getPoolConfig(): pg.PoolConfig {
   const ca = resolveCaCert();
   if (ca) {
     config.ssl = { rejectUnauthorized: true, ca: ca.pem };
-    console.log(`[db] TLS verification on, CA from ${ca.source}`);
+    log.info(`TLS verification on, CA from ${ca.source}`);
   } else {
     // Node's bundled roots. Correct for the Supabase poolers.
     config.ssl = { rejectUnauthorized: true };
@@ -97,7 +100,7 @@ export const pool = new Pool(getPoolConfig());
 // process. Idle backends get closed by Supabase's pooler routinely, so this is
 // not an exceptional path.
 pool.on('error', (err) => {
-  console.error('[db] idle client error:', err instanceof Error ? err.message : err);
+  log.error('idle client error:', err);
 });
 
 export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(

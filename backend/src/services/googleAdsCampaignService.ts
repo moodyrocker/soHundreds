@@ -1,6 +1,9 @@
 import type { GoogleAdsCampaignState } from '../types/execution.js';
 import { MCPConnectionService } from './mcpConnectionService.js';
 import { parseGoogleAdsError } from '../utils/parseGoogleAdsError.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('google-ads-campaign');
 
 const API_VERSION = process.env.GOOGLE_ADS_API_VERSION ?? 'v21';
 
@@ -160,7 +163,7 @@ export class GoogleAdsCampaignService {
     if (!response.ok) {
       const err = await response.text();
       const parsed = parseGoogleAdsError(err, response.status);
-      console.warn('[google-ads-campaign] mutate failed:', response.status, err.slice(0, 600));
+      log.warn('mutate failed:', response.status, err.slice(0, 600));
       throw new Error(
         parsed.userMessage ??
           parsed.message ??

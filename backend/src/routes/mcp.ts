@@ -16,6 +16,9 @@ import {
 import { SnapshotHealthService } from '../services/snapshotHealthService.js';
 import { McpServerHealthService } from '../services/mcpServerHealthService.js';
 import type { TenantRequest } from '../middleware/tenant.js';
+import { logger } from '../lib/logger.js';
+
+const log = logger('mcp');
 
 const connectSchema = z.object({
   platform: z.enum([
@@ -416,7 +419,7 @@ export function createMCPRouter(): Router {
         const result = await mcpService.connectMailchimp(tenant.id, body.apiKey, {
           defaultListId: body.defaultListId ?? null,
         });
-        console.log(`[mcp] connect ok platform=mailchimp org=${tenant.id}`);
+        log.info(`connect ok platform=mailchimp org=${tenant.id}`);
         res.json({
           success: true,
           platform: 'mailchimp',
@@ -431,11 +434,11 @@ export function createMCPRouter(): Router {
         return;
       }
 
-      console.log(`[mcp] connect ok platform=${body.platform} org=${tenant.id}`);
+      log.info(`connect ok platform=${body.platform} org=${tenant.id}`);
       res.json({ success: true, platform: body.platform });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'connect failed';
-      console.error(`[mcp] connect failed platform=${platform ?? '?'} org=${tenant.id}:`, message);
+      log.error(`connect failed platform=${platform ?? '?'} org=${tenant.id}:`, message);
       next(err);
     }
   });
