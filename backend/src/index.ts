@@ -1,6 +1,5 @@
 // Must precede any import that reads process.env at module scope.
 import './lib/loadEnv.js';
-import Anthropic from '@anthropic-ai/sdk';
 import cors from 'cors';
 import express from 'express';
 import { authMiddleware } from './middleware/auth.js';
@@ -17,9 +16,23 @@ import { createAdCampaignsRouter } from './routes/adCampaigns.js';
 import { createCheckupRouter } from './routes/checkup.js';
 import { createExecutionRouter } from './routes/execution.js';
 import { mountAllMcpBridges } from './mcp/mountMcpBridges.js';
+import { securityHeaders } from './lib/securityHeaders.js';
+import { dbLimiter, memoryLimiter } from './lib/rateLimit.js';
+import { attachRequestId, errorHandler } from './lib/errorHandler.js';
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
+
+// Behind the Next.js proxy (and a load balancer in production), so req.ip must
+// come from X-Forwarded-For rather than the socket. Bounded to 1 hop: trusting
+// the whole chain would let a client forge its own IP for the auth limiter.
+app.set('trust proxy', 1);
+
+// Do not advertise the framework.
+app.disable('x-powered-by');
+
+app.use(securityHeaders);
+app.use(attachRequestId);
 
 app.use(
   cors({
@@ -31,7 +44,11 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+
+// Bound the body size. express.json() defaults to 100kb, but it was left
+// implicit; state it, and allow an override since plan documents and generated
+// content can be large.
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT?.trim() || '1mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -57,12 +74,18 @@ app.post('/api/meta/webhook', (_req, res) => {
 
 mountAllMcpBridges(app);
 
-app.use('/api/auth', createAuthRouter());
+// Auth is pre-tenant, so it is limited by IP — the only bucket that can be.
+app.use('/api/auth', dbLimiter('auth'), createAuthRouter());
 app.use('/api/organizations', createOrganizationsRouter());
 
 const tenantRoutes = express.Router();
 tenantRoutes.use(authMiddleware);
 tenantRoutes.use(tenantMiddleware);
+
+// General ceiling for everything tenant-scoped. Per-process and approximate;
+// the cost-critical buckets below are the ones that must be exact.
+tenantRoutes.use(memoryLimiter());
+
 tenantRoutes.use('/mcp', (req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -74,49 +97,33 @@ tenantRoutes.use('/mcp', (req, res, next) => {
   next();
 });
 tenantRoutes.use('/mcp', createMCPRouter());
-tenantRoutes.use('/strategy', createStrategyRouter());
-tenantRoutes.use('/business-profile', createBusinessProfileRouter());
-tenantRoutes.use('/content-recipes', createContentRecipesRouter());
-tenantRoutes.use('/brand-visuals', createBrandVisualsRouter());
-tenantRoutes.use('/runway-tests', createRunwayPromptTestsRouter());
-tenantRoutes.use('/ad-campaigns', createAdCampaignsRouter());
-tenantRoutes.use('/checkup', createCheckupRouter());
-tenantRoutes.use('/execution', createExecutionRouter());
+
+// Cost-critical buckets, counted in Postgres so the ceiling holds across
+// replicas. Applied to whole route groups rather than individual handlers: the
+// limit is a spend ceiling, and a GET that happens to sit alongside a Claude
+// call is cheap enough that including it costs nothing.
+//
+// ai_generation — every route group that can reach ClaudeService.
+tenantRoutes.use('/strategy', dbLimiter('ai_generation'), createStrategyRouter());
+tenantRoutes.use('/checkup', dbLimiter('ai_generation'), createCheckupRouter());
+tenantRoutes.use('/business-profile', dbLimiter('ai_generation'), createBusinessProfileRouter());
+tenantRoutes.use('/content-recipes', dbLimiter('ai_generation'), createContentRecipesRouter());
+tenantRoutes.use('/runway-tests', dbLimiter('ai_generation'), createRunwayPromptTestsRouter());
+
+// paid_ads — creating or pushing campaigns that spend real budget.
+tenantRoutes.use('/ad-campaigns', dbLimiter('paid_ads'), createAdCampaignsRouter());
+
+// content_publish — Shopify pages/blogs/SEO, Instagram, Mailchimp, and the
+// orchestrator steps that drive them.
+tenantRoutes.use('/execution', dbLimiter('content_publish'), createExecutionRouter());
+tenantRoutes.use('/brand-visuals', dbLimiter('content_publish'), createBrandVisualsRouter());
+
 app.use('/api', tenantRoutes);
 
-app.use(
-  (
-    err: Error & { issues?: unknown },
-    _req: express.Request,
-    res: express.Response,
-    _next: express.NextFunction
-  ) => {
-    console.error(err);
-    if (err.name === 'ZodError') {
-      res.status(400).json({ error: 'Validation failed', details: err.issues });
-      return;
-    }
-
-    const message = err instanceof Error ? err.message : 'Internal server error';
-    if (err instanceof Anthropic.APIError && /MCP server|communicating with MCP/i.test(message)) {
-      res.status(502).json({
-        error:
-          'Remote analytics connector failed. Restart the API container and try again — plans use direct Google Analytics API data.',
-      });
-      return;
-    }
-
-    if (/MCP server|communicating with MCP/i.test(message)) {
-      res.status(502).json({
-        error:
-          'Remote analytics connector failed. Restart the API container and try again.',
-      });
-      return;
-    }
-
-    res.status(500).json({ error: message || 'Internal server error' });
-  }
-);
+// Sanitises the response and logs full detail against the request id.
+// See lib/errorHandler.ts — the previous inline handler returned raw
+// Error.message, which leaked SQL fragments and upstream response bodies.
+app.use(errorHandler);
 
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
