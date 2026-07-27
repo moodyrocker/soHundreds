@@ -1826,14 +1826,48 @@ export class ExecutionService {
       .filter(Boolean)
       .join(' · ');
 
-    const published = await this.instagram.publishPhotoForAction({
+    // Reserve before publishing. Previously the row was inserted *after* the
+    // post went live, which left nothing for a concurrent caller to conflict
+    // with — so two runs could both publish the same action. See
+    // reserveExecution and uniq_action_executions_in_flight.
+    const reserved = await this.reserveExecution({
       organizationId,
-      action,
-      goal: strategy.goal,
-      businessContext: businessContext || strategy.context,
-      profile,
-      brief: agentBrief,
+      strategyId,
+      actionId: action.id,
+      platform: route.platform,
+      executionType: route.executionType,
+      riskLevel: route.riskLevel,
+      summary: `Publishing to Instagram — ${action.title}`,
+      targetLabel: action.title,
+      proposedState: { kind: 'instagram_publish', mediaType: 'photo' } as ExecutionPayload,
     });
+
+    if (!reserved) {
+      // Either another caller is mid-publish or this action already published.
+      // Refusing here is the entire point: the alternative is a duplicate post
+      // on the customer's feed.
+      throw new Error(
+        `Instagram publish for "${action.title}" is already running or has already completed.`
+      );
+    }
+
+    let published: Awaited<ReturnType<InstagramExecutionService['publishPhotoForAction']>>;
+    try {
+      published = await this.instagram.publishPhotoForAction({
+        organizationId,
+        action,
+        goal: strategy.goal,
+        businessContext: businessContext || strategy.context,
+        profile,
+        brief: agentBrief,
+      });
+    } catch (err) {
+      // The post may or may not exist on Instagram. Mark failed rather than
+      // releasing the reservation: a retry that republishes is worse than a
+      // failure a human can look at.
+      await this.markFailed(organizationId, reserved.id, err);
+      throw err;
+    }
 
     const summary =
       published.mediaType === 'story'
@@ -1852,37 +1886,10 @@ export class ExecutionService {
           ? `Published to Instagram — ${published.permalink}`
           : `Published to Instagram (media ${published.mediaId ?? 'created'})`;
 
-    const insert = await query<ExecutionRow>(
-      `INSERT INTO action_executions (
-         organization_id, strategy_id, action_id, platform, execution_type,
-         status, risk_level, summary, target_label, before_state, proposed_state,
-         after_state, executed_at
-       ) VALUES ($1, $2, $3, $4, $5, 'executed', $6, $7, $8, NULL, $9::jsonb, $9::jsonb, NOW())
-       RETURNING *`,
-      [
-        organizationId,
-        strategyId,
-        action.id,
-        route.platform,
-        route.executionType,
-        route.riskLevel,
-        summary,
-        action.title,
-        JSON.stringify(published),
-      ]
-    );
-
-    const execution = mapRow(insert.rows[0]);
-
-    await this.audit.recordExecutionWrite({
-      organizationId,
-      strategyId: execution.strategyId,
-      eventType: 'action_executed',
-      executionId: execution.id,
-      actionId: execution.actionId,
-      platform: execution.platform,
-      beforeState: null,
-      afterState: published,
+    // Completes the row reserved above. markExecuted also writes the audit entry,
+    // so the post-write bookkeeping is identical to every approve path.
+    const execution = await this.markExecuted(organizationId, reserved.id, {
+      after: published,
       summary,
     });
 
@@ -2642,6 +2649,76 @@ export class ExecutionService {
    * `releaseExecutionClaim` call in `approve()` is guarded by
    * `AND status = 'executing'` so it cannot undo this.
    */
+  /**
+   * Reserves an execution row *before* an unattended external write.
+   *
+   * `approve()` protects itself by claiming an existing `previewed` row. The
+   * publish paths have no such row — they create one after the write — so their
+   * only guard was a read-then-check in runWeekActions:
+   *
+   *     const priorSameType = existing.find(e => e.actionId === action.id && ...)
+   *
+   * which is the same shape as the duplicate-spend bug fixed in 7400720. Two
+   * callers both read "no prior execution" and both publish, and with
+   * INSTAGRAM_AUTO_PUBLISH set nobody is watching when it happens.
+   *
+   * Inserting first turns that into a race the database arbitrates: the partial
+   * unique index `uniq_action_executions_in_flight` permits one `executing` row
+   * per (organization, strategy, action, type), so a second caller's INSERT
+   * conflicts and it never reaches the platform.
+   *
+   * Returns null when the reservation is lost — either another caller is
+   * publishing right now, or this action already published.
+   */
+  private async reserveExecution(params: {
+    organizationId: string;
+    strategyId: string;
+    actionId: string;
+    platform: string;
+    executionType: string;
+    riskLevel: string;
+    summary: string;
+    targetLabel: string | null;
+    proposedState: ExecutionPayload;
+  }): Promise<ExecutionRow | null> {
+    // Already published for this action and type: nothing more to do. Checked
+    // separately from the index because a completed row is not `executing`, so
+    // the index cannot express it. Not atomic on its own — the index is what
+    // closes the concurrent case.
+    const done = await query<{ id: string }>(
+      `SELECT id FROM action_executions
+       WHERE organization_id = $1 AND strategy_id = $2 AND action_id = $3
+         AND execution_type = $4 AND status = 'executed'
+       LIMIT 1`,
+      [params.organizationId, params.strategyId, params.actionId, params.executionType]
+    );
+    if (done.rowCount) return null;
+
+    const inserted = await query<ExecutionRow>(
+      `INSERT INTO action_executions (
+         organization_id, strategy_id, action_id, platform, execution_type,
+         status, risk_level, summary, target_label, before_state, proposed_state,
+         claimed_at, claimed_by, attempt_count
+       ) VALUES ($1, $2, $3, $4, $5, 'executing', $6, $7, $8, NULL, $9::jsonb, NOW(), $10, 1)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        params.organizationId,
+        params.strategyId,
+        params.actionId,
+        params.platform,
+        params.executionType,
+        params.riskLevel,
+        params.summary,
+        params.targetLabel,
+        JSON.stringify(params.proposedState),
+        INSTANCE_ID,
+      ]
+    );
+
+    return inserted.rows[0] ?? null;
+  }
+
   private async markFailed(
     organizationId: string,
     executionId: string,
