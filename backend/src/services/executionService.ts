@@ -199,26 +199,89 @@ function extractPayloadReasoning(payload: ExecutionPayload): string | null {
   return null;
 }
 
+/**
+ * Collaborators ExecutionService delegates to.
+ *
+ * These were field initialisers (`private shopify = new ShopifyExecutionService()`),
+ * which made the class impossible to test: constructing it reached for real
+ * Shopify, Meta, Google and Anthropic clients. Since every approve path performs
+ * an irreversible external write, "impossible to test" also meant the seven
+ * approve handlers could only be verified by running them against live accounts.
+ *
+ * Injection is the prerequisite for the characterisation tests in
+ * executionService.approve.test.ts, which assert that each execution type reaches
+ * its own platform client and no other. That assertion is what makes the split
+ * described in docs/EXECUTION_SERVICE_SPLIT.md verifiable — `tsc` cannot catch a
+ * mis-route, because every handler shares one signature.
+ */
+export type ExecutionServiceDeps = {
+  strategy: StrategyService;
+  mcp: MCPConnectionService;
+  shopify: ShopifyExecutionService;
+  instagram: InstagramExecutionService;
+  googleAdsCampaign: GoogleAdsCampaignService;
+  metaAdsCampaign: MetaAdsCampaignService;
+  mailchimpExecution: MailchimpExecutionService;
+  googleAdsSnapshot: GoogleAdsSnapshotService;
+  metaAdsSnapshot: MetaAdsSnapshotService;
+  assist: AssistExecutor;
+  claude: ClaudeService;
+  audit: AuditLogService;
+  activity: AutopilotActivityService;
+  preflight: AutopilotPreflightService;
+  completions: ActionCompletionService;
+  learning: LearningKnowledgeService;
+  recipes: ContentRecipeKnowledgeService;
+  visuals: BrandVisualLibraryService;
+  adCampaignLibrary: AdCampaignLibraryService;
+};
+
 export class ExecutionService {
-  private strategy = new StrategyService();
-  private mcp = new MCPConnectionService();
-  private shopify = new ShopifyExecutionService();
-  private instagram = new InstagramExecutionService();
-  private googleAdsCampaign = new GoogleAdsCampaignService();
-  private metaAdsCampaign = new MetaAdsCampaignService();
-  private mailchimpExecution = new MailchimpExecutionService();
-  private googleAdsSnapshot = new GoogleAdsSnapshotService();
-  private metaAdsSnapshot = new MetaAdsSnapshotService();
-  private assist = new AssistExecutor();
-  private claude = new ClaudeService();
-  private audit = new AuditLogService();
-  private activity = new AutopilotActivityService();
-  private preflight = new AutopilotPreflightService();
-  private completions = new ActionCompletionService();
-  private learning = new LearningKnowledgeService();
-  private recipes = new ContentRecipeKnowledgeService();
-  private visuals = new BrandVisualLibraryService();
-  private adCampaignLibrary = new AdCampaignLibraryService();
+  private strategy: StrategyService;
+  private mcp: MCPConnectionService;
+  private shopify: ShopifyExecutionService;
+  private instagram: InstagramExecutionService;
+  private googleAdsCampaign: GoogleAdsCampaignService;
+  private metaAdsCampaign: MetaAdsCampaignService;
+  private mailchimpExecution: MailchimpExecutionService;
+  private googleAdsSnapshot: GoogleAdsSnapshotService;
+  private metaAdsSnapshot: MetaAdsSnapshotService;
+  private assist: AssistExecutor;
+  private claude: ClaudeService;
+  private audit: AuditLogService;
+  private activity: AutopilotActivityService;
+  private preflight: AutopilotPreflightService;
+  private completions: ActionCompletionService;
+  private learning: LearningKnowledgeService;
+  private recipes: ContentRecipeKnowledgeService;
+  private visuals: BrandVisualLibraryService;
+  private adCampaignLibrary: AdCampaignLibraryService;
+
+  /**
+   * Production callers construct with no arguments and get the real services, so
+   * every existing `new ExecutionService()` is unchanged. Tests pass fakes.
+   */
+  constructor(deps: Partial<ExecutionServiceDeps> = {}) {
+    this.strategy = deps.strategy ?? new StrategyService();
+    this.mcp = deps.mcp ?? new MCPConnectionService();
+    this.shopify = deps.shopify ?? new ShopifyExecutionService();
+    this.instagram = deps.instagram ?? new InstagramExecutionService();
+    this.googleAdsCampaign = deps.googleAdsCampaign ?? new GoogleAdsCampaignService();
+    this.metaAdsCampaign = deps.metaAdsCampaign ?? new MetaAdsCampaignService();
+    this.mailchimpExecution = deps.mailchimpExecution ?? new MailchimpExecutionService();
+    this.googleAdsSnapshot = deps.googleAdsSnapshot ?? new GoogleAdsSnapshotService();
+    this.metaAdsSnapshot = deps.metaAdsSnapshot ?? new MetaAdsSnapshotService();
+    this.assist = deps.assist ?? new AssistExecutor();
+    this.claude = deps.claude ?? new ClaudeService();
+    this.audit = deps.audit ?? new AuditLogService();
+    this.activity = deps.activity ?? new AutopilotActivityService();
+    this.preflight = deps.preflight ?? new AutopilotPreflightService();
+    this.completions = deps.completions ?? new ActionCompletionService();
+    this.learning = deps.learning ?? new LearningKnowledgeService();
+    this.recipes = deps.recipes ?? new ContentRecipeKnowledgeService();
+    this.visuals = deps.visuals ?? new BrandVisualLibraryService();
+    this.adCampaignLibrary = deps.adCampaignLibrary ?? new AdCampaignLibraryService();
+  }
 
   private buildMcpCapabilityNotes(integrations: OrgIntegrationFlags): string {
     const lines: string[] = [];
