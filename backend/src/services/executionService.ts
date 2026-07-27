@@ -32,6 +32,9 @@ import {
   type OrgIntegrationFlags,
 } from '../executors/actionRouter.js';
 import { shopifyHasWriteContentScope, shopifyHasWriteProductsScope } from '../lib/shopifyAdmin.js';
+import { findExecutor } from './execution/registry.js';
+import { isPreflightRefusal } from './execution/types.js';
+import type { ExecutorDeps } from './execution/types.js';
 import { INSTANCE_ID } from '../lib/workerIdentity.js';
 import { AuditLogService } from './auditLogService.js';
 import { AutopilotActivityService } from './autopilotActivityService.js';
@@ -1508,13 +1511,7 @@ export class ExecutionService {
     }
   }
 
-  private metaCreatedSummary(campaignName: string, campaignId: string): string {
-    return `Created paused Meta campaign "${campaignName}" with creatives (ID ${campaignId}) — enable spend in Ads Manager when ready.`;
-  }
 
-  private googleCreatedSummary(campaignName: string): string {
-    return `Created paused Google Ads campaign "${campaignName}" — enable it in Google Ads when ready.`;
-  }
 
   /**
    * Approves an execution and performs its external write.
@@ -1536,14 +1533,12 @@ export class ExecutionService {
     if (existing.status !== 'previewed') {
       throw new Error(`Cannot approve execution in status "${existing.status}"`);
     }
-    if (
-      existing.execution_type !== 'create_shopify_page' &&
-      existing.execution_type !== 'create_shopify_blog_article' &&
-      existing.execution_type !== 'create_google_ads_campaign' &&
-      existing.execution_type !== 'create_meta_ads_campaign' &&
-      existing.execution_type !== 'create_mailchimp_drafts' &&
-      existing.execution_type !== 'update_product_seo'
-    ) {
+
+    // The set of approvable types is now derived from the registry rather than
+    // repeated as a hand-maintained list of != comparisons that had to stay in
+    // step with the switch below.
+    const executor = findExecutor(existing.execution_type);
+    if (!executor) {
       throw new Error('Only Shopify or ad platform writes require approval');
     }
 
@@ -1560,226 +1555,54 @@ export class ExecutionService {
     }
 
     try {
-      switch (row.execution_type) {
-        case 'create_shopify_page':
-          return await this.approveShopifyPage(organizationId, executionId, row);
-        case 'create_shopify_blog_article':
-          return await this.approveShopifyBlogArticle(organizationId, executionId, row);
-        case 'create_google_ads_campaign':
-          return await this.approveGoogleAdsCampaign(organizationId, executionId, row);
-        case 'create_meta_ads_campaign':
-          return await this.approveMetaAdsCampaign(organizationId, executionId, row);
-        case 'create_mailchimp_drafts':
-          return await this.approveMailchimpSequence(organizationId, executionId, row);
-        default:
-          return await this.approveProductSeo(organizationId, executionId, row, edits);
-      }
+      // The executor performs the external write and returns what to persist.
+      // Claiming, persistence and the audit row stay here on purpose: the claim is
+      // the duplicate-spend guard, and it must not become something each executor
+      // is trusted to remember.
+      const result = await executor.apply({
+        organizationId,
+        executionId,
+        row,
+        edits,
+        deps: this.executorDeps(),
+      });
+      return await this.markExecuted(organizationId, executionId, result);
     } catch (err) {
-      // No-op when the handler already reached 'failed'; restores 'previewed'
-      // when the throw came from a pre-flight refusal (missing scope, channel
-      // cap, SEO cooldown) that never touched the external API.
+      // A pre-flight refusal (missing scope, channel cap, SEO cooldown, paid-ad
+      // throttle) throws before any external call, so the execution can safely
+      // return to 'previewed' and be retried. Once the platform has been
+      // contacted the outcome is unknown, so mark it failed instead — and
+      // releaseExecutionClaim is guarded by `AND status = 'executing'` so it
+      // cannot undo that.
+      // A PreflightRefusal means nothing was sent, so the execution can safely
+      // return to 'previewed' and be retried once the user fixes the cause.
+      // Anything else is assumed to have reached the platform — the outcome
+      // upstream is unknown, so mark it failed rather than invite a retry that
+      // could publish twice or fund a second campaign.
+      if (!isPreflightRefusal(err)) {
+        await this.markFailed(organizationId, executionId, err);
+      }
       await this.releaseExecutionClaim(organizationId, executionId);
       throw err;
     }
   }
 
-  private async approveProductSeo(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow,
-    edits?: Partial<Pick<ProductSeoState, 'seoTitle' | 'seoDescription'>>
-  ): Promise<ExecutionRecord> {
-    const ctx = await this.mcp.getShopifyContext(organizationId);
-    if (!ctx) {
-      throw new Error('Shopify is not connected');
-    }
-
-    const config = await this.mcp.getPlatformConfig(organizationId, 'shopify');
-    if (!shopifyHasWriteProductsScope(config?.grantedScopes)) {
-      throw new Error(
-        'Missing write_products scope. Disconnect and reconnect Shopify, then approve all requested permissions.'
-      );
-    }
-
-    const proposed = asProductSeo(row.proposed_state);
-    const pace = await getAutopilotPace(organizationId);
-    const caps = await evaluateChannelCaps(organizationId, pace, 'update_product_seo');
-    if (!caps.allow) {
-      throw new Error(caps.reason ?? 'Product SEO daily cap reached');
-    }
-    const cooldown = await getSeoCooldownTargets(organizationId, pace);
-    if (cooldown.productIds.has(proposed.productId)) {
-      throw new Error(
-        `This product was SEO-updated within the last ${cooldown.cooldownDays} days. Waiting for rankings to settle.`
-      );
-    }
-
-    const toApply: ProductSeoState = {
-      ...proposed,
-      seoTitle: edits?.seoTitle?.trim() || proposed.seoTitle,
-      seoDescription: edits?.seoDescription?.trim() || proposed.seoDescription,
+  /** Platform clients handed to an executor. */
+  private executorDeps(): ExecutorDeps {
+    return {
+      mcp: this.mcp,
+      shopify: this.shopify,
+      googleAdsCampaign: this.googleAdsCampaign,
+      metaAdsCampaign: this.metaAdsCampaign,
+      mailchimpExecution: this.mailchimpExecution,
+      adCampaignLibrary: this.adCampaignLibrary,
     };
-
-    try {
-      const after = await this.shopify.applyProductSeo(ctx.shopDomain, ctx.accessToken, toApply);
-      return await this.markExecuted(organizationId, executionId, {
-        after,
-        // The edited values, not the original proposal — this is what was applied.
-        proposed: toApply,
-        // The pre-change SEO values are the rollback source for rollbackProductSeo.
-        preserveBeforeState: true,
-      });
-    } catch (err) {
-      await this.markFailed(organizationId, executionId, err);
-      throw err;
-    }
   }
 
-  private async approveShopifyPage(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const ctx = await this.mcp.getShopifyContext(organizationId);
-    if (!ctx) {
-      throw new Error('Shopify is not connected');
-    }
 
-    const config = await this.mcp.getPlatformConfig(organizationId, 'shopify');
-    if (!shopifyHasWriteContentScope(config?.grantedScopes)) {
-      throw new Error(
-        'Missing write_content scope. Disconnect and reconnect Shopify, then approve all requested permissions.'
-      );
-    }
 
-    const proposed = asShopifyPage(row.proposed_state);
 
-    try {
-      const after = await this.shopify.createPage(ctx.shopDomain, ctx.accessToken, proposed);
-      const pageUrl = shopStorefrontUrl(
-        after.shopDomain ?? ctx.shopDomain,
-        `/pages/${after.handle}`
-      );
-      return await this.markExecuted(organizationId, executionId, {
-        after,
-        summary: after.isPublished
-          ? `Published Shopify page "${after.title}" — ${pageUrl}`
-          : `Created Shopify page draft "${after.title}" — ${pageUrl}`,
-      });
-    } catch (err) {
-      await this.markFailed(organizationId, executionId, err);
-      throw err;
-    }
-  }
 
-  private async approveGoogleAdsCampaign(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const proposed = asGoogleAdsCampaign(row.proposed_state);
-
-    try {
-      const after = await this.googleAdsCampaign.createPausedCampaign(organizationId, proposed);
-      return await this.markExecuted(organizationId, executionId, {
-        after,
-        summary: this.googleCreatedSummary(after.campaignName),
-      });
-    } catch (err) {
-      await this.markFailed(organizationId, executionId, err);
-      throw err;
-    }
-  }
-
-  private async approveMetaAdsCampaign(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const proposed = asMetaAdsCampaign(row.proposed_state);
-
-    try {
-      if (!proposed.campaignId) {
-        const throttle = await evaluateMetaAdsCreateThrottle(organizationId);
-        if (!throttle.allowCreate) {
-          throw new Error(throttle.reason);
-        }
-      }
-
-      let proposal = proposed;
-      try {
-        proposal = await this.adCampaignLibrary.enrichWithCreatives(
-          organizationId,
-          proposed,
-          {
-            sourceExecutionId: executionId,
-            channel: 'meta',
-            prefer: 'auto',
-          }
-        );
-      } catch (creativeErr) {
-        log.warn(
-          'Meta creative prep skipped:',
-          creativeErr instanceof Error ? creativeErr.message : creativeErr
-        );
-      }
-
-      const after = await this.metaAdsCampaign.createPausedCampaign(organizationId, proposal);
-
-      // Library upsert stays ahead of the audit write, as before. It uses
-      // executionId directly — the same value the previous code read back as
-      // execution.id — so no row read is needed to sequence it correctly.
-      // Failure here is non-fatal: the campaign exists in Ads Manager either way,
-      // and metaCampaignReconciliation repairs the library later.
-      try {
-        await this.adCampaignLibrary.upsertFromMetaState(organizationId, after, {
-          sourceExecutionId: executionId,
-          channel: 'meta',
-        });
-      } catch (libErr) {
-        log.warn('failed to save Meta campaign to ads library:', libErr);
-      }
-
-      return await this.markExecuted(organizationId, executionId, {
-        after,
-        summary: this.metaCreatedSummary(after.campaignName, after.campaignId),
-      });
-    } catch (err) {
-      await this.markFailed(organizationId, executionId, err);
-      throw err;
-    }
-  }
-
-  private async approveMailchimpSequence(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const proposed = asMailchimpSequence(row.proposed_state);
-    const ctx = await this.mcp.getMailchimpContext(organizationId);
-    if (!ctx?.defaultListId) {
-      throw new Error('Mailchimp is not connected or no default audience is selected');
-    }
-
-    try {
-      const after = await this.mailchimpExecution.createDraftSequence(ctx, proposed);
-      const count = after.createdCampaigns?.length ?? after.emails.length;
-      const archiveUrl = after.createdCampaigns?.find((c) => c.archiveUrl?.startsWith('http'))
-        ?.archiveUrl;
-
-      return await this.markExecuted(organizationId, executionId, {
-        after,
-        // Both variants stress that Hundres never sends — Mailchimp drafts are
-        // created and left for the user to send.
-        summary: archiveUrl
-          ? `Created ${count} Mailchimp draft(s) for "${after.sequenceName}" — open: ${archiveUrl} (you send from Mailchimp; never auto-sent).`
-          : `Created ${count} Mailchimp draft campaign(s) for "${after.sequenceName}" — review and send in Mailchimp (Hundres never auto-sends).`,
-      });
-    } catch (err) {
-      await this.markFailed(organizationId, executionId, err);
-      throw err;
-    }
-  }
 
   async skip(organizationId: string, executionId: string): Promise<ExecutionRecord> {
     const row = await this.getRow(organizationId, executionId);
@@ -2132,57 +1955,6 @@ export class ExecutionService {
     };
   }
 
-  private async approveShopifyBlogArticle(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const ctx = await this.mcp.getShopifyContext(organizationId);
-    if (!ctx) {
-      throw new Error('Shopify is not connected');
-    }
-
-    const config = await this.mcp.getPlatformConfig(organizationId, 'shopify');
-    if (!shopifyHasWriteContentScope(config?.grantedScopes)) {
-      throw new Error(
-        'Missing write_content scope. Disconnect and reconnect Shopify, then approve all requested permissions.'
-      );
-    }
-
-    const proposed = asShopifyBlogArticle(row.proposed_state);
-    const blogs = await this.shopify.listBlogs(ctx.shopDomain, ctx.accessToken);
-    const blog = this.shopify.pickDefaultBlog(blogs);
-
-    const toApply: ShopifyBlogArticleState = {
-      ...proposed,
-      blogId: blog.id,
-      blogHandle: blog.handle,
-      shopDomain: ctx.shopDomain,
-    };
-
-    try {
-      const after = await this.shopify.createBlogArticle(
-        ctx.shopDomain,
-        ctx.accessToken,
-        toApply
-      );
-
-      const articleUrl = shopStorefrontUrl(
-        after.shopDomain ?? ctx.shopDomain,
-        `/blogs/${after.blogHandle}/${after.handle}`
-      );
-
-      return await this.markExecuted(organizationId, executionId, {
-        after,
-        summary: after.isPublished
-          ? `Published blog article "${after.title}" — ${articleUrl}`
-          : `Created blog draft "${after.title}" — ${articleUrl}`,
-      });
-    } catch (err) {
-      await this.markFailed(organizationId, executionId, err);
-      throw err;
-    }
-  }
 
   private async rollbackShopifyBlogArticle(
     organizationId: string,

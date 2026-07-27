@@ -89,6 +89,34 @@ vi.mock('../database/connection.js', () => ({
   pool: { on: vi.fn(), query: vi.fn(), connect: vi.fn() },
 }));
 
+/**
+ * Guards reached by direct module import rather than through injected deps.
+ *
+ * These are mocked so they can be controlled. Without that, they read through the
+ * mocked `query` above, get empty results, and permit everything — which meant
+ * deleting the Meta zero-spend throttle or the SEO cooldown changed nothing under
+ * test. Mutation testing caught both.
+ */
+const throttleState = { allowCreate: true, reason: '' };
+const cooldownState = { productIds: new Set<string>(), cooldownDays: 7 };
+const capsState = { allow: true, reason: '' as string | undefined };
+
+vi.mock('../lib/paidAdThrottle.js', () => ({
+  evaluateMetaAdsCreateThrottle: vi.fn(async () => ({ ...throttleState })),
+}));
+
+vi.mock('../lib/seoCooldown.js', () => ({
+  getSeoCooldownTargets: vi.fn(async () => ({
+    productIds: cooldownState.productIds,
+    cooldownDays: cooldownState.cooldownDays,
+  })),
+  evaluateChannelCaps: vi.fn(async () => ({ ...capsState })),
+}));
+
+vi.mock('./autopilotService.js', () => ({
+  getAutopilotPace: vi.fn(async () => 'normal'),
+}));
+
 // Feature flags read at module scope by some payload builders.
 process.env.ENCRYPTION_KEY = 'a'.repeat(64);
 process.env.DATABASE_URL = 'postgresql://test@127.0.0.1:1/test';
@@ -278,6 +306,12 @@ beforeEach(() => {
   appliedTransitions.length = 0;
   currentRow = null;
   claimSucceeds = true;
+  throttleState.allowCreate = true;
+  throttleState.reason = '';
+  cooldownState.productIds = new Set();
+  cooldownState.cooldownDays = 7;
+  capsState.allow = true;
+  capsState.reason = undefined;
   vi.clearAllMocks();
 });
 
@@ -715,6 +749,186 @@ describe('approve() state transitions', () => {
     await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(/not connected|audience/i);
     expect(f.mailchimpExecution.createDraftSequence).not.toHaveBeenCalled();
     expect(statusTransitions()).toContain('previewed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The registry, and the PreflightRefusal contract it relies on
+// ---------------------------------------------------------------------------
+
+describe('executor registry', () => {
+  it('registers exactly one executor per approvable type', async () => {
+    const { EXECUTORS, APPROVABLE_EXECUTION_TYPES } = await import('./execution/registry.js');
+    expect(new Set(APPROVABLE_EXECUTION_TYPES).size).toBe(EXECUTORS.length);
+  });
+
+  it('covers every type approve() accepts, and no others', async () => {
+    const { APPROVABLE_EXECUTION_TYPES } = await import('./execution/registry.js');
+    expect([...APPROVABLE_EXECUTION_TYPES].sort()).toEqual(
+      [
+        'create_google_ads_campaign',
+        'create_mailchimp_drafts',
+        'create_meta_ads_campaign',
+        'create_shopify_blog_article',
+        'create_shopify_page',
+        'update_product_seo',
+      ].sort()
+    );
+  });
+
+  it('each executor declares the type it is registered under', async () => {
+    // Guards against an entry being added to the list while its executionType
+    // still says something else — which would silently register it for the wrong
+    // type.
+    const { EXECUTORS, findExecutor } = await import('./execution/registry.js');
+    for (const executor of EXECUTORS) {
+      expect(findExecutor(executor.executionType)).toBe(executor);
+    }
+  });
+
+  it('returns undefined for an unknown type rather than a default', async () => {
+    // A default would mean a new execution type silently gets someone else's
+    // platform.
+    const { findExecutor } = await import('./execution/registry.js');
+    expect(findExecutor('create_tiktok_post')).toBeUndefined();
+    expect(findExecutor('')).toBeUndefined();
+  });
+});
+
+/**
+ * The guards that stop the agent doing something expensive or counterproductive.
+ * Each must refuse *before* the external call, and leave the execution retryable.
+ */
+describe('spend and quality guards refuse before reaching the platform', () => {
+  const metaRow = () =>
+    row({
+      platform: 'meta_ads',
+      execution_type: 'create_meta_ads_campaign',
+      proposed_state: {
+        kind: 'meta_ads_campaign',
+        campaignName: 'M',
+        campaignId: null,
+        ads: [],
+      },
+    });
+
+  it('the Meta zero-spend throttle blocks a new campaign', async () => {
+    // The guard that stops budget going out while earlier campaigns sit unspent.
+    throttleState.allowCreate = false;
+    throttleState.reason =
+      'Earlier Meta campaigns have $0 spend — no signal to learn from yet. Enable spend on one before creating another.';
+
+    const f = makeFakes();
+    currentRow = metaRow();
+
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(/\$0 spend/);
+    expect(f.metaAdsCampaign.createPausedCampaign).not.toHaveBeenCalled();
+    // Retryable: it becomes allowed once the earlier campaign spends.
+    expect(statusTransitions()).toContain('previewed');
+    expect(statusTransitions()).not.toContain('failed');
+  });
+
+  it('the throttle is skipped for a re-run against an existing campaign', async () => {
+    // campaignId already set means this is not a new campaign, so the
+    // "don't create another" rule does not apply.
+    throttleState.allowCreate = false;
+    throttleState.reason = 'blocked';
+
+    const f = makeFakes();
+    currentRow = row({
+      platform: 'meta_ads',
+      execution_type: 'create_meta_ads_campaign',
+      proposed_state: {
+        kind: 'meta_ads_campaign',
+        campaignName: 'M',
+        campaignId: 'existing-123',
+        ads: [],
+      },
+    });
+
+    await expect(service(f).approve('org-1', 'exec-1')).resolves.toBeTruthy();
+    expect(f.metaAdsCampaign.createPausedCampaign).toHaveBeenCalledTimes(1);
+  });
+
+  it('the SEO cooldown blocks re-editing the same product', async () => {
+    // Re-editing churns rankings without producing measurable signal.
+    cooldownState.productIds = new Set(['p1']);
+    cooldownState.cooldownDays = 14;
+
+    const f = makeFakes();
+    currentRow = row();
+
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(
+      /within the last 14 days/
+    );
+    expect(f.shopify.applyProductSeo).not.toHaveBeenCalled();
+    expect(statusTransitions()).toContain('previewed');
+  });
+
+  it('the cooldown allows a different product', async () => {
+    cooldownState.productIds = new Set(['some-other-product']);
+    const f = makeFakes();
+    currentRow = row();
+    await expect(service(f).approve('org-1', 'exec-1')).resolves.toBeTruthy();
+    expect(f.shopify.applyProductSeo).toHaveBeenCalledTimes(1);
+  });
+
+  it('the daily channel cap blocks further SEO writes', async () => {
+    capsState.allow = false;
+    capsState.reason = 'Product SEO daily cap reached';
+
+    const f = makeFakes();
+    currentRow = row();
+
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(/daily cap reached/);
+    expect(f.shopify.applyProductSeo).not.toHaveBeenCalled();
+    expect(statusTransitions()).toContain('previewed');
+  });
+
+  it('falls back to a usable message when the cap gives no reason', async () => {
+    capsState.allow = false;
+    capsState.reason = undefined;
+    const f = makeFakes();
+    currentRow = row();
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(
+      /Product SEO daily cap reached/
+    );
+  });
+});
+
+describe('PreflightRefusal decides retryability', () => {
+  it('a refusal from an executor leaves the execution previewed', async () => {
+    const { PreflightRefusal } = await import('./execution/types.js');
+    const f = makeFakes();
+    f.mcp.getShopifyContext.mockImplementationOnce(async () => {
+      throw new PreflightRefusal('Shopify is not connected');
+    });
+    currentRow = row();
+
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(/not connected/);
+    expect(statusTransitions()).toContain('previewed');
+    expect(statusTransitions()).not.toContain('failed');
+  });
+
+  it('a plain Error is assumed to have reached the platform and marks failed', async () => {
+    // The safe default: if we cannot prove nothing was sent, do not invite a
+    // retry that could double-apply.
+    const f = makeFakes();
+    f.shopify.applyProductSeo.mockRejectedValueOnce(new Error('socket hang up'));
+    currentRow = row();
+
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow('socket hang up');
+    expect(statusTransitions()).toContain('failed');
+    expect(statusTransitions()).not.toContain('previewed');
+  });
+
+  it('a payload-mismatch guard marks failed, because routing is a code bug', async () => {
+    // asProductSeo throwing means the wrong executor received this row. Leaving it
+    // previewed would let it be retried into the same wrong executor forever.
+    const f = makeFakes();
+    currentRow = row({ proposed_state: { kind: 'shopify_page' } });
+    await expect(service(f).approve('org-1', 'exec-1')).rejects.toThrow(/Expected .* payload/);
+    expect(f.shopify.applyProductSeo).not.toHaveBeenCalled();
   });
 });
 
