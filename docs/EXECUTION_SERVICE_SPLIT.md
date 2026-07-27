@@ -1,6 +1,17 @@
 # Splitting `executionService.ts` — plan
 
-**Status:** planned, not started. Tests landed first (see §4).
+**Status:** steps 1–4 done. The approve paths are extracted; preview generation is
+not. See §7 for what remains.
+
+| Step | Status | Commit |
+|---|---|---|
+| 0 — unit tests for parsers and guards | done | `125f181` |
+| 1 — constructor injection + characterisation net | done | `a82a35c` |
+| 2 — `markExecuted` / `markFailed` | done | `b205a25` |
+| 3 — six platform executors | done | `0cd8559` |
+| 4 — registry replaces the switch | done | `0cd8559` |
+| 5 — preview extraction | **not started** | — |
+| 6 — `claudeService` prompt extraction | not started | — |
 
 `backend/src/services/executionService.ts` is 2,981 lines in a single class with
 49 methods. Every branch in it performs an irreversible external write: a live
@@ -182,3 +193,61 @@ regresses and you need to know what moved.
 Steps 1 and 2 are independently valuable and low-risk. Step 3 is where care is
 needed; it is also interruptible between executors, so it does not need to be
 finished in one sitting.
+
+---
+
+## 7. What remains
+
+**Preview generation.** Seven `run*Preview` methods, roughly 900 lines, still in
+`executionService.ts`. They are harder than the approve paths were:
+
+- they reach `ClaudeService`, the analytics/ads snapshot services, the content
+  recipe library and the brand visual library — a much wider dependency surface
+  than the six platform clients an executor needs
+- they are *not* covered by `executionService.approve.test.ts`, so there is no
+  net for them yet
+- unlike approve, they have no single uniform shape to factor out
+
+Sequence, when it is picked up: characterisation tests for `preview()` first,
+asserting the same negative property the approve tests do — each execution type
+consults its own generator and no other — then extract one at a time, and only
+then add `preview()` to the `PlatformExecutor` interface.
+
+**Non-approve write paths.** `runInstagramPublish` and `runAssist` write
+externally but do not go through `approve()`, so they were out of scope here.
+Instagram publishing in particular deserves the same treatment, since
+`INSTAGRAM_AUTO_PUBLISH` makes it unattended.
+
+**Rollback.** `rollbackProductSeo`, `rollbackShopifyPage` and
+`rollbackShopifyBlogArticle` are still on the service. They are small and
+symmetrical with the executors, so adding an optional `rollback` to
+`PlatformExecutor` is the natural follow-on — and cheap, because
+`preserveBeforeState` is already tested.
+
+**`claudeService.ts`** (1,880 lines) is untouched. Extracting prompts to
+`prompts/*.ts` would make prompt changes diffable, which matters when plan quality
+regresses and you need to know what moved.
+
+## 8. Notes from doing it
+
+Two things worth recording, because both were cases of the work looking safer
+than it was.
+
+**A mock can enforce a guard on the code's behalf.** The first version of the
+database mock hardcoded "the claim only succeeds from `previewed`" instead of
+reading the precondition out of the SQL. Deleting `AND status = 'previewed'` from
+the real query therefore changed nothing under test. Mutation testing found it;
+the mock now derives every precondition from the statement.
+
+**Some guards are not observable through the public interface.** That same claim
+precondition cannot be exercised behaviourally, because `approve()` pre-checks the
+status with a plain read which shadows it. It only holds in the race it exists for
+— two callers both passing the pre-check, then both claiming. There is now an
+explicit structural assertion that the precondition is present in the statement,
+with a comment saying why it is structural rather than pretending otherwise.
+
+**Guards reached by direct import are invisible to a dependency-injection net.**
+The Meta zero-spend throttle and the SEO cooldown are module imports, not injected
+deps, so they read through the mocked `query`, got empty results, and permitted
+everything. Deleting either changed no test. They are now mocked explicitly. Worth
+checking for the same pattern before trusting a net over the preview paths.
