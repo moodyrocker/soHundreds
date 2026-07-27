@@ -19,6 +19,19 @@ import { decrypt, encrypt, isLegacyCiphertext, reencrypt } from './encryption.js
 const HEX_KEY_A = 'a'.repeat(64);
 const HEX_KEY_B = 'b'.repeat(64);
 const PASSPHRASE_KEY = 'a-passphrase-that-is-not-hex';
+
+/**
+ * Stand-in for a stored credential.
+ *
+ * Deliberately *not* shaped like a real Shopify token. The first version of this
+ * fixture was `shpat_` followed by 32 hex characters, which is exactly the format
+ * of a live Shopify Admin API token — GitHub's push protection blocked the push,
+ * correctly, because a scanner cannot tell a convincing fake from the real thing.
+ *
+ * Any fixture standing in for a credential should be obviously synthetic. The
+ * value here is irrelevant to what the tests assert: they only care that
+ * decrypt(encrypt(x)) === x.
+ */
 const SECRET = 'fake-credential-for-tests-do-not-use';
 
 /** Byte-for-byte what the original implementation produced: no version prefix. */
