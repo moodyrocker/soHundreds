@@ -5,13 +5,24 @@ not. See §7 for what remains.
 
 | Step | Status | Commit |
 |---|---|---|
-| 0 — unit tests for parsers and guards | done | `125f181` |
-| 1 — constructor injection + characterisation net | done | `a82a35c` |
-| 2 — `markExecuted` / `markFailed` | done | `b205a25` |
-| 3 — six platform executors | done | `0cd8559` |
-| 4 — registry replaces the switch | done | `0cd8559` |
+| 0 — unit tests for parsers and guards | done | `860d9da` |
+| 1 — constructor injection + characterisation net | done | `b5e61f7` |
+| 2 — `markExecuted` / `markFailed` | done | `c8ef94d` |
+| 3 — six platform executors | done | `55280f2` |
+| 4 — registry replaces the switch | done | `55280f2` |
+| — Instagram publish guard | done | `9cbb7e9` |
+| — rollback into executors | done | `cb31f04` |
 | 5 — preview extraction | **not started** | — |
 | 6 — `claudeService` prompt extraction | not started | — |
+
+> **Note on commit hashes.** History from step 0 onward was rewritten to remove a
+> test fixture that matched the format of a real Shopify token (GitHub push
+> protection blocked it, correctly — the fixture was `shpat_` plus 32 hex
+> characters, which is indistinguishable from a live credential to a scanner).
+> The hashes above are the post-rewrite ones. One commit message — step 2's —
+> still refers to step 1 by its pre-rewrite hash `a82a35c`; that commit is now
+> `b5e61f7`. References to `7400720` and earlier predate the rewrite and remain
+> valid.
 
 `backend/src/services/executionService.ts` is 2,981 lines in a single class with
 49 methods. Every branch in it performs an irreversible external write: a live
