@@ -34,7 +34,7 @@ import {
 import { shopifyHasWriteContentScope, shopifyHasWriteProductsScope } from '../lib/shopifyAdmin.js';
 import { findExecutor } from './execution/registry.js';
 import { isPreflightRefusal } from './execution/types.js';
-import type { ExecutorDeps } from './execution/types.js';
+import type { ExecutorDeps, RollbackResult } from './execution/types.js';
 import { INSTANCE_ID } from '../lib/workerIdentity.js';
 import { AuditLogService } from './auditLogService.js';
 import { AutopilotActivityService } from './autopilotActivityService.js';
@@ -1619,54 +1619,65 @@ export class ExecutionService {
     return mapRow(updated.rows[0]);
   }
 
+  /**
+   * Undoes a completed write.
+   *
+   * Dispatches through the same registry as approve(), so an execution type can
+   * only ever be undone by the executor that created it — the same structural
+   * guarantee, applied to the reverse direction.
+   *
+   * An executor without a `rollback` is one whose write cannot be undone: both ad
+   * platforms (we do not delete a campaign; the user pauses or removes it in Ads
+   * Manager) and Mailchimp drafts. Saying so explicitly matters more than it
+   * looks — a user told "rolled back" about an irreversible action would stop
+   * looking for the thing that is still there.
+   */
   async rollback(organizationId: string, executionId: string): Promise<ExecutionRecord> {
     const row = await this.getRow(organizationId, executionId);
     if (row.status !== 'executed') {
       throw new Error('Only executed actions can be rolled back');
     }
 
-    if (row.execution_type === 'create_shopify_page') {
-      return this.rollbackShopifyPage(organizationId, executionId, row);
+    const executor = findExecutor(row.execution_type);
+    if (!executor?.rollback) {
+      throw new Error(
+        executor
+          ? `${executor.label} cannot be rolled back automatically — undo it on the platform directly.`
+          : 'Rollback is only available for Shopify writes'
+      );
     }
 
-    if (row.execution_type === 'create_shopify_blog_article') {
-      return this.rollbackShopifyBlogArticle(organizationId, executionId, row);
-    }
+    const result = await executor.rollback({
+      organizationId,
+      executionId,
+      row,
+      deps: this.executorDeps(),
+    });
 
-    if (row.execution_type !== 'update_product_seo') {
-      throw new Error('Rollback is only available for Shopify writes');
-    }
-    if (!row.before_state) {
-      throw new Error('No before-state stored for rollback');
-    }
-
-    return this.rollbackProductSeo(organizationId, executionId, row);
+    return this.markRolledBack(organizationId, executionId, result);
   }
 
-  private async rollbackProductSeo(
+  /**
+   * Records a completed rollback.
+   *
+   * The three rollback handlers each ended with the same UPDATE and audit write,
+   * differing only in whether a restored payload existed — the same duplication
+   * markExecuted removed from the approve side.
+   */
+  private async markRolledBack(
     organizationId: string,
     executionId: string,
-    row: ExecutionRow
+    result: RollbackResult
   ): Promise<ExecutionRecord> {
-    const ctx = await this.mcp.getShopifyContext(organizationId);
-    if (!ctx) {
-      throw new Error('Shopify is not connected');
-    }
-
-    const restored = await this.shopify.applyProductSeo(
-      ctx.shopDomain,
-      ctx.accessToken,
-      asProductSeo(row.before_state!)
-    );
-
     const updated = await query<ExecutionRow>(
       `UPDATE action_executions SET
          status = 'rolled_back',
-         after_state = $3::jsonb,
+         after_state = COALESCE($3::jsonb, after_state),
          rolled_back_at = NOW(),
          updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2 RETURNING *`,
-      [executionId, organizationId, JSON.stringify(restored)]
+       WHERE id = $1 AND organization_id = $2
+       RETURNING *`,
+      [executionId, organizationId, result.after ? JSON.stringify(result.after) : null]
     );
 
     const execution = mapRow(updated.rows[0]);
@@ -1678,56 +1689,15 @@ export class ExecutionService {
       executionId: execution.id,
       actionId: execution.actionId,
       platform: execution.platform,
-      beforeState: row.after_state,
-      afterState: restored,
-      summary: `Rollback for ${execution.targetLabel ?? execution.actionId}`,
+      beforeState: result.undone,
+      afterState: result.after,
+      summary: result.summary,
     });
 
     return execution;
   }
 
-  private async rollbackShopifyPage(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const afterState = row.after_state ? asShopifyPage(row.after_state) : null;
-    if (!afterState?.pageId) {
-      throw new Error('No page ID stored for rollback');
-    }
 
-    const ctx = await this.mcp.getShopifyContext(organizationId);
-    if (!ctx) {
-      throw new Error('Shopify is not connected');
-    }
-
-    await this.shopify.deletePage(ctx.shopDomain, ctx.accessToken, afterState.pageId);
-
-    const updated = await query<ExecutionRow>(
-      `UPDATE action_executions SET
-         status = 'rolled_back',
-         rolled_back_at = NOW(),
-         updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2 RETURNING *`,
-      [executionId, organizationId]
-    );
-
-    const execution = mapRow(updated.rows[0]);
-
-    await this.audit.recordExecutionWrite({
-      organizationId,
-      strategyId: execution.strategyId,
-      eventType: 'action_rolled_back',
-      executionId: execution.id,
-      actionId: execution.actionId,
-      platform: execution.platform,
-      beforeState: afterState,
-      afterState: null,
-      summary: `Deleted page "${afterState.title}" during rollback`,
-    });
-
-    return execution;
-  }
 
   private isAdHocInstagramContentRequest(
     message: string,
@@ -1963,48 +1933,6 @@ export class ExecutionService {
   }
 
 
-  private async rollbackShopifyBlogArticle(
-    organizationId: string,
-    executionId: string,
-    row: ExecutionRow
-  ): Promise<ExecutionRecord> {
-    const afterState = row.after_state ? asShopifyBlogArticle(row.after_state) : null;
-    if (!afterState?.articleId) {
-      throw new Error('No article ID stored for rollback');
-    }
-
-    const ctx = await this.mcp.getShopifyContext(organizationId);
-    if (!ctx) {
-      throw new Error('Shopify is not connected');
-    }
-
-    await this.shopify.deleteArticle(ctx.shopDomain, ctx.accessToken, afterState.articleId);
-
-    const updated = await query<ExecutionRow>(
-      `UPDATE action_executions SET
-         status = 'rolled_back',
-         rolled_back_at = NOW(),
-         updated_at = NOW()
-       WHERE id = $1 AND organization_id = $2 RETURNING *`,
-      [executionId, organizationId]
-    );
-
-    const execution = mapRow(updated.rows[0]);
-
-    await this.audit.recordExecutionWrite({
-      organizationId,
-      strategyId: execution.strategyId,
-      eventType: 'action_rolled_back',
-      executionId: execution.id,
-      actionId: execution.actionId,
-      platform: execution.platform,
-      beforeState: afterState,
-      afterState: null,
-      summary: `Deleted blog article "${afterState.title}" during rollback`,
-    });
-
-    return execution;
-  }
 
   private async generateInstagramAssistDeliverable(
     organizationId: string,

@@ -896,6 +896,143 @@ describe('spend and quality guards refuse before reaching the platform', () => {
   });
 });
 
+describe('rollback() routes through the same registry', () => {
+  function executedRow(overrides: Record<string, unknown> = {}) {
+    return row({
+      status: 'executed',
+      before_state: {
+        kind: 'product_seo',
+        productId: 'p1',
+        productTitle: 'Product A',
+        seoTitle: 'Original title',
+        seoDescription: 'Original description',
+      },
+      after_state: {
+        kind: 'product_seo',
+        productId: 'p1',
+        productTitle: 'Product A',
+        seoTitle: 'New title',
+        seoDescription: 'New description',
+      },
+      ...overrides,
+    });
+  }
+
+  it('restores product SEO from before_state', async () => {
+    const f = makeFakes();
+    currentRow = executedRow();
+    await service(f).rollback('org-1', 'exec-1');
+
+    expect(f.shopify.applyProductSeo).toHaveBeenCalledTimes(1);
+    const [, , payload] = f.shopify.applyProductSeo.mock.calls[0]!;
+    // The *original* values, not the ones that were applied.
+    expect(payload).toMatchObject({ seoTitle: 'Original title' });
+    expect(statusTransitions()).toContain('rolled_back');
+  });
+
+  it('deletes the page it created, by id', async () => {
+    const f = makeFakes();
+    currentRow = executedRow({
+      execution_type: 'create_shopify_page',
+      before_state: null,
+      after_state: { kind: 'shopify_page', pageId: 'page-99', title: 'About' },
+    });
+    await service(f).rollback('org-1', 'exec-1');
+
+    expect(f.shopify.deletePage).toHaveBeenCalledWith(
+      'shop.myshopify.com',
+      't',
+      'page-99'
+    );
+  });
+
+  it('deletes the blog article it created', async () => {
+    const f = makeFakes();
+    currentRow = executedRow({
+      execution_type: 'create_shopify_blog_article',
+      before_state: null,
+      after_state: { kind: 'shopify_blog_article', articleId: 'art-99', title: 'Post' },
+    });
+    await service(f).rollback('org-1', 'exec-1');
+    expect(f.shopify.deleteArticle).toHaveBeenCalledWith('shop.myshopify.com', 't', 'art-99');
+  });
+
+  it('refuses when the platform cannot undo the write', async () => {
+    // Both ad platforms and Mailchimp have no rollback. Telling a user their
+    // campaign was rolled back when it still exists in Ads Manager would stop
+    // them looking for it.
+    const f = makeFakes();
+    currentRow = executedRow({
+      platform: 'meta_ads',
+      execution_type: 'create_meta_ads_campaign',
+      before_state: null,
+      after_state: { kind: 'meta_ads_campaign', campaignName: 'M', campaignId: 'm-1', ads: [] },
+    });
+
+    await expect(service(f).rollback('org-1', 'exec-1')).rejects.toThrow(
+      /cannot be rolled back automatically/
+    );
+    expect(statusTransitions()).not.toContain('rolled_back');
+  });
+
+  it('names the platform in the refusal so the user knows where to look', async () => {
+    const f = makeFakes();
+    currentRow = executedRow({
+      platform: 'mailchimp',
+      execution_type: 'create_mailchimp_drafts',
+      before_state: null,
+      after_state: { kind: 'mailchimp_sequence', sequenceName: 'W', emails: [] },
+    });
+    await expect(service(f).rollback('org-1', 'exec-1')).rejects.toThrow(/Mailchimp/);
+  });
+
+  it('refuses to roll back something that never executed', async () => {
+    const f = makeFakes();
+    currentRow = row({ status: 'previewed' });
+    await expect(service(f).rollback('org-1', 'exec-1')).rejects.toThrow(
+      /Only executed actions/
+    );
+    expect(f.shopify.applyProductSeo).not.toHaveBeenCalled();
+  });
+
+  it('refuses when before_state is missing, rather than writing something wrong', async () => {
+    const f = makeFakes();
+    currentRow = executedRow({ before_state: null });
+    await expect(service(f).rollback('org-1', 'exec-1')).rejects.toThrow(/No before-state/);
+    expect(f.shopify.applyProductSeo).not.toHaveBeenCalled();
+  });
+
+  it('refuses to delete a page with no stored id', async () => {
+    // Guessing by handle could delete a page someone created by hand.
+    const f = makeFakes();
+    currentRow = executedRow({
+      execution_type: 'create_shopify_page',
+      before_state: null,
+      after_state: { kind: 'shopify_page', pageId: null, title: 'About' },
+    });
+    await expect(service(f).rollback('org-1', 'exec-1')).rejects.toThrow(/No page ID/);
+    expect(f.shopify.deletePage).not.toHaveBeenCalled();
+  });
+
+  it('records an audit entry with the rolled-back event type', async () => {
+    const f = makeFakes();
+    currentRow = executedRow();
+    await service(f).rollback('org-1', 'exec-1');
+    expect(f.audit.recordExecutionWrite.mock.calls[0]![0]).toMatchObject({
+      eventType: 'action_rolled_back',
+    });
+  });
+
+  it('stamps rolled_back_at and scopes the update to the organization', async () => {
+    const f = makeFakes();
+    currentRow = executedRow();
+    await service(f).rollback('org-1', 'exec-1');
+    const sql = sqlIssued().find((s) => s.includes("status = 'rolled_back'"))!;
+    expect(sql).toContain('rolled_back_at = NOW()');
+    expect(sql).toMatch(/WHERE id = \$1 AND organization_id = \$2/);
+  });
+});
+
 describe('PreflightRefusal decides retryability', () => {
   it('a refusal from an executor leaves the execution previewed', async () => {
     const { PreflightRefusal } = await import('./execution/types.js');

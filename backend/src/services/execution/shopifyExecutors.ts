@@ -5,7 +5,13 @@ import { getAutopilotPace } from '../autopilotService.js';
 import type { ProductSeoState, ShopifyBlogArticleState } from '../../types/execution.js';
 import { asProductSeo, asShopifyBlogArticle, asShopifyPage } from './payloads.js';
 import { PreflightRefusal } from './types.js';
-import type { ApplyContext, ApplyResult, PlatformExecutor } from './types.js';
+import type {
+  ApplyContext,
+  ApplyResult,
+  PlatformExecutor,
+  RollbackContext,
+  RollbackResult,
+} from './types.js';
 
 /**
  * The three Shopify write paths.
@@ -26,6 +32,22 @@ async function requireShopify(ctx: ApplyContext) {
   if (!shop) {
     // Wording matched by SAFE_MESSAGE_PATTERNS in lib/errorHandler.ts.
     throw new PreflightRefusal('Shopify is not connected');
+  }
+  return shop;
+}
+
+/**
+ * Rollback's connectivity check.
+ *
+ * Separate from requireShopify because rollback throws a plain Error rather than
+ * a PreflightRefusal: PreflightRefusal means "return the execution to previewed",
+ * which is meaningless here — the row is `executed` and staying that way is the
+ * correct outcome of a failed rollback.
+ */
+async function requireShopifyForRollback(ctx: RollbackContext) {
+  const shop = await ctx.deps.mcp.getShopifyContext(ctx.organizationId);
+  if (!shop) {
+    throw new Error('Shopify is not connected');
   }
   return shop;
 }
@@ -94,6 +116,29 @@ export const productSeoExecutor: PlatformExecutor = {
       preserveBeforeState: true,
     };
   },
+
+  /** Re-applies the values captured in before_state. */
+  async rollback(ctx: RollbackContext): Promise<RollbackResult> {
+    const shop = await requireShopifyForRollback(ctx);
+
+    if (!ctx.row.before_state) {
+      // This is why apply() sets preserveBeforeState. Without it there is nothing
+      // to restore and the change is permanent.
+      throw new Error('No before-state stored for rollback');
+    }
+
+    const restored = await ctx.deps.shopify.applyProductSeo(
+      shop.shopDomain,
+      shop.accessToken,
+      asProductSeo(ctx.row.before_state)
+    );
+
+    return {
+      after: restored,
+      undone: ctx.row.after_state,
+      summary: `Rollback for ${ctx.row.target_label ?? ctx.row.action_id}`,
+    };
+  },
 };
 
 /** Creates a Shopify page, published or draft per the auto-publish flag. */
@@ -117,6 +162,25 @@ export const shopifyPageExecutor: PlatformExecutor = {
       summary: after.isPublished
         ? `Published Shopify page "${after.title}" — ${pageUrl}`
         : `Created Shopify page draft "${after.title}" — ${pageUrl}`,
+    };
+  },
+
+  /** Deletes the created page. */
+  async rollback(ctx: RollbackContext): Promise<RollbackResult> {
+    const afterState = ctx.row.after_state ? asShopifyPage(ctx.row.after_state) : null;
+    if (!afterState?.pageId) {
+      // Checked before connecting: without the id there is nothing to delete, and
+      // guessing by handle could remove a page someone created by hand.
+      throw new Error('No page ID stored for rollback');
+    }
+
+    const shop = await requireShopifyForRollback(ctx);
+    await ctx.deps.shopify.deletePage(shop.shopDomain, shop.accessToken, afterState.pageId);
+
+    return {
+      after: null, // deleted, so there is no resulting state
+      undone: afterState,
+      summary: `Deleted page "${afterState.title}" during rollback`,
     };
   },
 };
@@ -161,6 +225,23 @@ export const shopifyBlogExecutor: PlatformExecutor = {
       summary: after.isPublished
         ? `Published blog article "${after.title}" — ${articleUrl}`
         : `Created blog draft "${after.title}" — ${articleUrl}`,
+    };
+  },
+
+  /** Deletes the created article. */
+  async rollback(ctx: RollbackContext): Promise<RollbackResult> {
+    const afterState = ctx.row.after_state ? asShopifyBlogArticle(ctx.row.after_state) : null;
+    if (!afterState?.articleId) {
+      throw new Error('No article ID stored for rollback');
+    }
+
+    const shop = await requireShopifyForRollback(ctx);
+    await ctx.deps.shopify.deleteArticle(shop.shopDomain, shop.accessToken, afterState.articleId);
+
+    return {
+      after: null,
+      undone: afterState,
+      summary: `Deleted blog article "${afterState.title}" during rollback`,
     };
   },
 };

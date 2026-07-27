@@ -137,6 +137,29 @@ export function isPreflightRefusal(err: unknown): err is PreflightRefusal {
   return err instanceof PreflightRefusal;
 }
 
+/**
+ * What to persist after a successful rollback.
+ *
+ * Narrower than ApplyResult: rollback never rewrites proposed_state or
+ * before_state, it only records what the platform ended up in and why.
+ */
+export type RollbackResult = {
+  /** Platform state after undoing, or null when the object was deleted. */
+  after: ExecutionPayload | null;
+  /** State that was undone, recorded as the audit entry's beforeState. */
+  undone: ExecutionPayload | null;
+  /** Audit summary. */
+  summary: string;
+};
+
+export type RollbackContext = {
+  organizationId: string;
+  executionId: string;
+  /** The executed row. `after_state` holds what was created. */
+  row: ExecutionRow;
+  deps: ExecutorDeps;
+};
+
 export interface PlatformExecutor {
   /** Value of `action_executions.execution_type` this executor handles. */
   readonly executionType: string;
@@ -155,4 +178,15 @@ export interface PlatformExecutor {
    * with a generic 500 before reaching the UI.
    */
   apply(ctx: ApplyContext): Promise<ApplyResult>;
+
+  /**
+   * Undoes a completed write, where the platform allows it.
+   *
+   * Absent means the write cannot be undone — which is true of both ad platforms
+   * (a created campaign is not deleted by us; the user pauses or removes it in
+   * Ads Manager) and of Mailchimp drafts. `ExecutionService.rollback` reports that
+   * rather than silently doing nothing, so a user is never told an irreversible
+   * action was reversed.
+   */
+  rollback?(ctx: RollbackContext): Promise<RollbackResult>;
 }
