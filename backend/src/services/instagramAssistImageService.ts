@@ -270,15 +270,6 @@ export async function pickLibraryImages(
   }
 }
 
-/** @deprecated Use pickInstagramImagesForAssist */
-export async function pickBrandImageForInstagramAssist(input: {
-  organizationId: string;
-  profile: BusinessProfile;
-  action: PlanAction;
-}): Promise<BrandImagePick | null> {
-  const picks = await pickInstagramImagesForAssist(input);
-  return picks[0] ?? null;
-}
 
 /**
  * Instagram stills: Visual library first.

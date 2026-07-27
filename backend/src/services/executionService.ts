@@ -1682,17 +1682,23 @@ export class ExecutionService {
 
     const execution = mapRow(updated.rows[0]);
 
-    await this.audit.recordExecutionWrite({
-      organizationId,
-      strategyId: execution.strategyId,
-      eventType: 'action_rolled_back',
-      executionId: execution.id,
-      actionId: execution.actionId,
-      platform: execution.platform,
-      beforeState: result.undone,
-      afterState: result.after,
-      summary: result.summary,
-    });
+    // Same reasoning as markExecuted: the undo already happened on the platform,
+    // so an audit failure must not make the caller think it did not.
+    try {
+      await this.audit.recordExecutionWrite({
+        organizationId,
+        strategyId: execution.strategyId,
+        eventType: 'action_rolled_back',
+        executionId: execution.id,
+        actionId: execution.actionId,
+        platform: execution.platform,
+        beforeState: result.undone,
+        afterState: result.after,
+        summary: result.summary,
+      });
+    } catch (auditErr) {
+      log.error('audit write failed for a completed rollback:', auditErr, { executionId });
+    }
 
     return execution;
   }
@@ -2553,17 +2559,34 @@ export class ExecutionService {
 
     const execution = mapRow(updated.rows[0]);
 
-    await this.audit.recordExecutionWrite({
-      organizationId,
-      strategyId: execution.strategyId,
-      eventType: 'action_executed',
-      executionId: execution.id,
-      actionId: execution.actionId,
-      platform: execution.platform,
-      beforeState: opts.preserveBeforeState ? execution.beforeState : null,
-      afterState: opts.after,
-      summary: opts.summary ?? execution.summary,
-    });
+    // The audit write must not be able to fail the execution.
+    //
+    // By this point the platform write has succeeded and the row says `executed`.
+    // If this threw, the error propagated to approve()'s catch, which — seeing a
+    // non-PreflightRefusal — called markFailed and recorded a live Shopify page or
+    // a funded ad campaign as `failed`. The user would then see a failure, retry,
+    // and create it twice.
+    //
+    // Losing an audit row is a real cost, but a much smaller one than
+    // misrecording state, so it is logged and swallowed.
+    try {
+      await this.audit.recordExecutionWrite({
+        organizationId,
+        strategyId: execution.strategyId,
+        eventType: 'action_executed',
+        executionId: execution.id,
+        actionId: execution.actionId,
+        platform: execution.platform,
+        beforeState: opts.preserveBeforeState ? execution.beforeState : null,
+        afterState: opts.after,
+        summary: opts.summary ?? execution.summary,
+      });
+    } catch (auditErr) {
+      log.error('audit write failed for a completed execution:', auditErr, {
+        executionId,
+        executionType: execution.executionType,
+      });
+    }
 
     return execution;
   }

@@ -26,7 +26,3 @@ export function mountAllMcpBridges(app: Express): void {
   mountOrgMcpBridge(app, '/mcp/mailchimp', 'mailchimp', createMailchimpMcpServerForOrg);
 }
 
-/** @deprecated use mountAllMcpBridges */
-export function mountShopifyMcpBridge(app: Express): void {
-  mountAllMcpBridges(app);
-}

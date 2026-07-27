@@ -109,18 +109,5 @@ export function mcpBridgePublicUrl(platform: McpBridgePlatform): string {
   return `${deploymentOrigin()}${pathByPlatform[platform]}`;
 }
 
-/** @deprecated use createMcpBridgeToken(orgId, 'shopify') */
-export function createShopifyBridgeToken(organizationId: string, ttlMs?: number): string {
-  return createMcpBridgeToken(organizationId, 'shopify', ttlMs);
-}
 
-/** @deprecated use verifyMcpBridgeToken(token, 'shopify') */
-export function verifyShopifyBridgeToken(token: string): { organizationId: string } | null {
-  const v = verifyMcpBridgeToken(token, 'shopify');
-  return v ? { organizationId: v.organizationId } : null;
-}
 
-/** @deprecated use mcpBridgePublicUrl('shopify') */
-export function shopifyMcpPublicUrl(): string {
-  return mcpBridgePublicUrl('shopify');
-}

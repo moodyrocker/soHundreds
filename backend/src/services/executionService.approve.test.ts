@@ -683,6 +683,33 @@ describe('approve() state transitions', () => {
     expect(statusTransitions()).not.toContain('failed');
   });
 
+  it('does not undo a completed write when the audit row fails to save', async () => {
+    // The platform write already succeeded and the row says executed. Letting the
+    // audit failure propagate meant approve()'s catch called markFailed, recording
+    // a live Shopify page as failed — so the user would retry and create it twice.
+    const f = makeFakes();
+    f.audit.recordExecutionWrite.mockRejectedValueOnce(new Error('audit table down'));
+    currentRow = row();
+
+    await expect(service(f).approve('org-1', 'exec-1')).resolves.toBeTruthy();
+    expect(f.shopify.applyProductSeo).toHaveBeenCalledTimes(1);
+    expect(statusTransitions()).toContain('executed');
+    expect(statusTransitions()).not.toContain('failed');
+  });
+
+  it('does not undo a completed rollback when the audit row fails to save', async () => {
+    const f = makeFakes();
+    f.audit.recordExecutionWrite.mockRejectedValueOnce(new Error('audit table down'));
+    currentRow = row({
+      status: 'executed',
+      before_state: { kind: 'product_seo', productId: 'p1', seoTitle: 'Old', seoDescription: 'Old' },
+      after_state: { kind: 'product_seo', productId: 'p1', seoTitle: 'New', seoDescription: 'New' },
+    });
+
+    await expect(service(f).rollback('org-1', 'exec-1')).resolves.toBeTruthy();
+    expect(statusTransitions()).toContain('rolled_back');
+  });
+
   it('records an audit entry on success', async () => {
     const f = makeFakes();
     currentRow = row();
