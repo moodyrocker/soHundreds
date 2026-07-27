@@ -1621,48 +1621,16 @@ export class ExecutionService {
     };
 
     try {
-      const after = await this.shopify.applyProductSeo(
-        ctx.shopDomain,
-        ctx.accessToken,
-        toApply
-      );
-
-      const updated = await query<ExecutionRow>(
-        `UPDATE action_executions SET
-           status = 'executed',
-           before_state = COALESCE(before_state, proposed_state),
-           proposed_state = $3::jsonb,
-           after_state = $4::jsonb,
-           error_message = NULL,
-           executed_at = NOW(),
-           updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2
-         RETURNING *`,
-        [executionId, organizationId, JSON.stringify(toApply), JSON.stringify(after)]
-      );
-
-      const execution = mapRow(updated.rows[0]);
-
-      await this.audit.recordExecutionWrite({
-        organizationId,
-        strategyId: execution.strategyId,
-        eventType: 'action_executed',
-        executionId: execution.id,
-        actionId: execution.actionId,
-        platform: execution.platform,
-        beforeState: execution.beforeState,
-        afterState: after,
-        summary: execution.summary,
+      const after = await this.shopify.applyProductSeo(ctx.shopDomain, ctx.accessToken, toApply);
+      return await this.markExecuted(organizationId, executionId, {
+        after,
+        // The edited values, not the original proposal — this is what was applied.
+        proposed: toApply,
+        // The pre-change SEO values are the rollback source for rollbackProductSeo.
+        preserveBeforeState: true,
       });
-
-      return execution;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Execution failed';
-      await query(
-        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2`,
-        [executionId, organizationId, message.slice(0, 2000)]
-      );
+      await this.markFailed(organizationId, executionId, err);
       throw err;
     }
   }
@@ -1688,54 +1656,18 @@ export class ExecutionService {
 
     try {
       const after = await this.shopify.createPage(ctx.shopDomain, ctx.accessToken, proposed);
-      const pageUrl = shopStorefrontUrl(after.shopDomain ?? ctx.shopDomain, `/pages/${after.handle}`);
-      const createdSummary = after.isPublished
-        ? `Published Shopify page "${after.title}" — ${pageUrl}`
-        : `Created Shopify page draft "${after.title}" — ${pageUrl}`;
-
-      const updated = await query<ExecutionRow>(
-        `UPDATE action_executions SET
-           status = 'executed',
-           before_state = NULL,
-           proposed_state = $3::jsonb,
-           after_state = $4::jsonb,
-           summary = $5,
-           error_message = NULL,
-           executed_at = NOW(),
-           updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2
-         RETURNING *`,
-        [
-          executionId,
-          organizationId,
-          JSON.stringify(after),
-          JSON.stringify(after),
-          createdSummary,
-        ]
+      const pageUrl = shopStorefrontUrl(
+        after.shopDomain ?? ctx.shopDomain,
+        `/pages/${after.handle}`
       );
-
-      const execution = mapRow(updated.rows[0]);
-
-      await this.audit.recordExecutionWrite({
-        organizationId,
-        strategyId: execution.strategyId,
-        eventType: 'action_executed',
-        executionId: execution.id,
-        actionId: execution.actionId,
-        platform: execution.platform,
-        beforeState: null,
-        afterState: after,
-        summary: createdSummary,
+      return await this.markExecuted(organizationId, executionId, {
+        after,
+        summary: after.isPublished
+          ? `Published Shopify page "${after.title}" — ${pageUrl}`
+          : `Created Shopify page draft "${after.title}" — ${pageUrl}`,
       });
-
-      return execution;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Execution failed';
-      await query(
-        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2`,
-        [executionId, organizationId, message.slice(0, 2000)]
-      );
+      await this.markFailed(organizationId, executionId, err);
       throw err;
     }
   }
@@ -1749,45 +1681,12 @@ export class ExecutionService {
 
     try {
       const after = await this.googleAdsCampaign.createPausedCampaign(organizationId, proposed);
-      const createdSummary = this.googleCreatedSummary(after.campaignName);
-
-      const updated = await query<ExecutionRow>(
-        `UPDATE action_executions SET
-           status = 'executed',
-           before_state = NULL,
-           proposed_state = $3::jsonb,
-           after_state = $4::jsonb,
-           summary = $5,
-           error_message = NULL,
-           executed_at = NOW(),
-           updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2
-         RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
-      );
-
-      const execution = mapRow(updated.rows[0]);
-
-      await this.audit.recordExecutionWrite({
-        organizationId,
-        strategyId: execution.strategyId,
-        eventType: 'action_executed',
-        executionId: execution.id,
-        actionId: execution.actionId,
-        platform: execution.platform,
-        beforeState: null,
-        afterState: after,
-        summary: createdSummary,
+      return await this.markExecuted(organizationId, executionId, {
+        after,
+        summary: this.googleCreatedSummary(after.campaignName),
       });
-
-      return execution;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Execution failed';
-      await query(
-        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2`,
-        [executionId, organizationId, message.slice(0, 2000)]
-      );
+      await this.markFailed(organizationId, executionId, err);
       throw err;
     }
   }
@@ -1826,57 +1725,27 @@ export class ExecutionService {
       }
 
       const after = await this.metaAdsCampaign.createPausedCampaign(organizationId, proposal);
-      const createdSummary = this.metaCreatedSummary(after.campaignName, after.campaignId);
 
-      const updated = await query<ExecutionRow>(
-        `UPDATE action_executions SET
-           status = 'executed',
-           before_state = NULL,
-           proposed_state = $3::jsonb,
-           after_state = $4::jsonb,
-           summary = $5,
-           error_message = NULL,
-           executed_at = NOW(),
-           updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2
-         RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
-      );
-
-      const execution = mapRow(updated.rows[0]);
-
+      // Library upsert stays ahead of the audit write, as before. It uses
+      // executionId directly — the same value the previous code read back as
+      // execution.id — so no row read is needed to sequence it correctly.
+      // Failure here is non-fatal: the campaign exists in Ads Manager either way,
+      // and metaCampaignReconciliation repairs the library later.
       try {
         await this.adCampaignLibrary.upsertFromMetaState(organizationId, after, {
-          sourceExecutionId: execution.id,
+          sourceExecutionId: executionId,
           channel: 'meta',
         });
       } catch (libErr) {
-        log.warn(
-          'failed to save Meta campaign to ads library:',
-          libErr instanceof Error ? libErr.message : libErr
-        );
+        log.warn('failed to save Meta campaign to ads library:', libErr);
       }
 
-      await this.audit.recordExecutionWrite({
-        organizationId,
-        strategyId: execution.strategyId,
-        eventType: 'action_executed',
-        executionId: execution.id,
-        actionId: execution.actionId,
-        platform: execution.platform,
-        beforeState: null,
-        afterState: after,
-        summary: createdSummary,
+      return await this.markExecuted(organizationId, executionId, {
+        after,
+        summary: this.metaCreatedSummary(after.campaignName, after.campaignId),
       });
-
-      return execution;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Execution failed';
-      await query(
-        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2`,
-        [executionId, organizationId, message.slice(0, 2000)]
-      );
+      await this.markFailed(organizationId, executionId, err);
       throw err;
     }
   }
@@ -1897,47 +1766,17 @@ export class ExecutionService {
       const count = after.createdCampaigns?.length ?? after.emails.length;
       const archiveUrl = after.createdCampaigns?.find((c) => c.archiveUrl?.startsWith('http'))
         ?.archiveUrl;
-      const createdSummary = archiveUrl
-        ? `Created ${count} Mailchimp draft(s) for "${after.sequenceName}" — open: ${archiveUrl} (you send from Mailchimp; never auto-sent).`
-        : `Created ${count} Mailchimp draft campaign(s) for "${after.sequenceName}" — review and send in Mailchimp (Hundres never auto-sends).`;
 
-      const updated = await query<ExecutionRow>(
-        `UPDATE action_executions SET
-           status = 'executed',
-           before_state = NULL,
-           proposed_state = $3::jsonb,
-           after_state = $4::jsonb,
-           summary = $5,
-           error_message = NULL,
-           executed_at = NOW(),
-           updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2
-         RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
-      );
-
-      const execution = mapRow(updated.rows[0]);
-
-      await this.audit.recordExecutionWrite({
-        organizationId,
-        strategyId: execution.strategyId,
-        eventType: 'action_executed',
-        executionId: execution.id,
-        actionId: execution.actionId,
-        platform: execution.platform,
-        beforeState: null,
-        afterState: after,
-        summary: createdSummary,
+      return await this.markExecuted(organizationId, executionId, {
+        after,
+        // Both variants stress that Hundres never sends — Mailchimp drafts are
+        // created and left for the user to send.
+        summary: archiveUrl
+          ? `Created ${count} Mailchimp draft(s) for "${after.sequenceName}" — open: ${archiveUrl} (you send from Mailchimp; never auto-sent).`
+          : `Created ${count} Mailchimp draft campaign(s) for "${after.sequenceName}" — review and send in Mailchimp (Hundres never auto-sends).`,
       });
-
-      return execution;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Execution failed';
-      await query(
-        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2`,
-        [executionId, organizationId, message.slice(0, 2000)]
-      );
+      await this.markFailed(organizationId, executionId, err);
       throw err;
     }
   }
@@ -2328,53 +2167,19 @@ export class ExecutionService {
         toApply
       );
 
-      const createdSummary = after.isPublished
-        ? `Published blog article "${after.title}" — ${shopStorefrontUrl(
-            after.shopDomain ?? ctx.shopDomain,
-            `/blogs/${after.blogHandle}/${after.handle}`
-          )}`
-        : `Created blog draft "${after.title}" — ${shopStorefrontUrl(
-            after.shopDomain ?? ctx.shopDomain,
-            `/blogs/${after.blogHandle}/${after.handle}`
-          )}`;
-
-      const updated = await query<ExecutionRow>(
-        `UPDATE action_executions SET
-           status = 'executed',
-           before_state = NULL,
-           proposed_state = $3::jsonb,
-           after_state = $4::jsonb,
-           summary = $5,
-           error_message = NULL,
-           executed_at = NOW(),
-           updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2
-         RETURNING *`,
-        [executionId, organizationId, JSON.stringify(after), JSON.stringify(after), createdSummary]
+      const articleUrl = shopStorefrontUrl(
+        after.shopDomain ?? ctx.shopDomain,
+        `/blogs/${after.blogHandle}/${after.handle}`
       );
 
-      const execution = mapRow(updated.rows[0]);
-
-      await this.audit.recordExecutionWrite({
-        organizationId,
-        strategyId: execution.strategyId,
-        eventType: 'action_executed',
-        executionId: execution.id,
-        actionId: execution.actionId,
-        platform: execution.platform,
-        beforeState: null,
-        afterState: after,
-        summary: createdSummary,
+      return await this.markExecuted(organizationId, executionId, {
+        after,
+        summary: after.isPublished
+          ? `Published blog article "${after.title}" — ${articleUrl}`
+          : `Created blog draft "${after.title}" — ${articleUrl}`,
       });
-
-      return execution;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Execution failed';
-      await query(
-        `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
-         WHERE id = $1 AND organization_id = $2`,
-        [executionId, organizationId, message.slice(0, 2000)]
-      );
+      await this.markFailed(organizationId, executionId, err);
       throw err;
     }
   }
@@ -2973,6 +2778,109 @@ export class ExecutionService {
       throw new Error('Execution not found');
     }
     return row;
+  }
+
+  /**
+   * Records a successful external write: sets `executed`, stores the resulting
+   * payload, and writes the audit row.
+   *
+   * All seven approve handlers ended with a near-identical 35-line block —
+   * the same UPDATE, the same mapRow, the same audit call — differing only in
+   * whether `before_state` was preserved and whether `summary` was replaced. That
+   * duplication was roughly 200 lines and made each handler's actual platform
+   * logic hard to find. It also meant a fix to the audit payload had to be applied
+   * seven times.
+   *
+   * Two variants existed and both are preserved exactly:
+   *
+   *   preserveBeforeState: true   COALESCE(before_state, proposed_state) — used by
+   *                               product SEO, where the pre-change values are the
+   *                               rollback source.
+   *   preserveBeforeState: false  before_state = NULL — used by every create path,
+   *                               where there is no prior state to restore.
+   */
+  private async markExecuted(
+    organizationId: string,
+    executionId: string,
+    opts: {
+      /** Payload returned by the platform. */
+      after: ExecutionPayload;
+      /** Stored as proposed_state. Defaults to `after` (create paths). */
+      proposed?: ExecutionPayload;
+      /** COALESCE existing before_state instead of nulling it. */
+      preserveBeforeState?: boolean;
+      /** Replaces the row summary. Omit to leave the existing summary intact. */
+      summary?: string;
+    }
+  ): Promise<ExecutionRecord> {
+    const proposed = opts.proposed ?? opts.after;
+    const beforeStateSql = opts.preserveBeforeState
+      ? 'COALESCE(before_state, proposed_state)'
+      : 'NULL';
+    // Only touch summary when a replacement was supplied; COALESCE on the
+    // parameter keeps the existing value when it is null.
+    const summarySql = opts.summary === undefined ? 'summary' : 'COALESCE($5, summary)';
+
+    const updated = await query<ExecutionRow>(
+      `UPDATE action_executions SET
+         status = 'executed',
+         before_state = ${beforeStateSql},
+         proposed_state = $3::jsonb,
+         after_state = $4::jsonb,
+         summary = ${summarySql},
+         error_message = NULL,
+         executed_at = NOW(),
+         updated_at = NOW()
+       WHERE id = $1 AND organization_id = $2
+       RETURNING *`,
+      opts.summary === undefined
+        ? [executionId, organizationId, JSON.stringify(proposed), JSON.stringify(opts.after)]
+        : [
+            executionId,
+            organizationId,
+            JSON.stringify(proposed),
+            JSON.stringify(opts.after),
+            opts.summary,
+          ]
+    );
+
+    const execution = mapRow(updated.rows[0]);
+
+    await this.audit.recordExecutionWrite({
+      organizationId,
+      strategyId: execution.strategyId,
+      eventType: 'action_executed',
+      executionId: execution.id,
+      actionId: execution.actionId,
+      platform: execution.platform,
+      beforeState: opts.preserveBeforeState ? execution.beforeState : null,
+      afterState: opts.after,
+      summary: opts.summary ?? execution.summary,
+    });
+
+    return execution;
+  }
+
+  /**
+   * Records a failed external write.
+   *
+   * Deliberately terminal: it does not return the execution to `previewed`. Once
+   * the platform has been contacted the outcome is unknown, and a retry could
+   * double-apply — create a second ad campaign, publish a second page. The
+   * `releaseExecutionClaim` call in `approve()` is guarded by
+   * `AND status = 'executing'` so it cannot undo this.
+   */
+  private async markFailed(
+    organizationId: string,
+    executionId: string,
+    err: unknown
+  ): Promise<void> {
+    const message = err instanceof Error ? err.message : 'Execution failed';
+    await query(
+      `UPDATE action_executions SET status = 'failed', error_message = $3, updated_at = NOW()
+       WHERE id = $1 AND organization_id = $2`,
+      [executionId, organizationId, message.slice(0, 2000)]
+    );
   }
 
   /**

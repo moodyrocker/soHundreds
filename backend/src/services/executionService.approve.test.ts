@@ -50,25 +50,23 @@ vi.mock('../database/connection.js', () => ({
     queryCalls.push({ sql, params });
     const normalised = sql.replace(/\s+/g, ' ').trim();
 
-    // claimExecutionForWrite: previewed -> executing, guarded on previewed.
-    if (normalised.includes("SET status = 'executing'")) {
-      if (!claimSucceeds) {
-        // The winner got there first: the row is now executing and we get nothing.
-        currentRow = { ...(currentRow ?? {}), status: 'executing' };
-        return { rows: [], rowCount: 0 };
-      }
-      if (currentRow?.status !== 'previewed') return { rows: [], rowCount: 0 };
-      currentRow = { ...currentRow, status: 'executing' };
-      appliedTransitions.push('executing');
-      return { rows: [currentRow], rowCount: 1 };
-    }
-
     if (normalised.startsWith('UPDATE')) {
       const setStatus = /SET\s+status\s*=\s*'(\w+)'/.exec(normalised)?.[1];
-      // Any status precondition in the WHERE clause must hold, exactly as it
-      // would in Postgres.
+
+      // The precondition is read from the SQL, never assumed. An earlier version
+      // hardcoded "the claim only succeeds from previewed" in the mock, which
+      // meant deleting `AND status = 'previewed'` from the real query changed
+      // nothing under test — the mock was enforcing the guard on the code's
+      // behalf. Mutation testing caught that.
       const requiredStatus = /WHERE[\s\S]*?\bstatus\s*=\s*'(\w+)'/.exec(normalised)?.[1];
-      const applies = !requiredStatus || currentRow?.status === requiredStatus;
+      let applies = !requiredStatus || currentRow?.status === requiredStatus;
+
+      // Simulate losing the race: another caller claimed it between our read and
+      // our claim, so the row is already executing and we get no rows back.
+      if (setStatus === 'executing' && !claimSucceeds) {
+        currentRow = { ...(currentRow ?? {}), status: 'executing' };
+        applies = false;
+      }
 
       if (applies && setStatus) {
         currentRow = { ...(currentRow ?? {}), status: setStatus };
@@ -106,35 +104,51 @@ const { ExecutionService } = await import('./executionService.js');
  * and that the others did not. This is the whole point of the file.
  */
 function makeFakes() {
+  // Fakes echo the payload they were handed, as the real clients do. A fake that
+  // invents its own shape hides bugs in how the result is used — the first draft
+  // of this file returned bare stubs, and the summary assertions read
+  // "Created Shopify page draft "undefined"" as a result.
   const shopify = {
-    applyProductSeo: vi.fn(async () => ({ kind: 'product_seo', productId: 'p1' })),
-    createPage: vi.fn(async () => ({ kind: 'shopify_page', pageId: 'page-1' })),
-    createBlogArticle: vi.fn(async () => ({ kind: 'shopify_blog_article', articleId: 'art-1' })),
+    applyProductSeo: vi.fn(async (_d: string, _t: string, state: Record<string, unknown>) => ({
+      ...state,
+      kind: 'product_seo',
+    })),
+    createPage: vi.fn(async (_d: string, _t: string, state: Record<string, unknown>) => ({
+      ...state,
+      kind: 'shopify_page',
+      pageId: 'page-1',
+      shopDomain: 'shop.myshopify.com',
+    })),
+    createBlogArticle: vi.fn(async (_d: string, _t: string, state: Record<string, unknown>) => ({
+      ...state,
+      kind: 'shopify_blog_article',
+      articleId: 'art-1',
+      shopDomain: 'shop.myshopify.com',
+    })),
     listBlogs: vi.fn(async () => [{ id: 'blog-1', title: 'News' }]),
     pickDefaultBlog: vi.fn(async () => ({ id: 'blog-1', title: 'News' })),
     deletePage: vi.fn(async () => undefined),
     deleteArticle: vi.fn(async () => undefined),
   };
   const googleAdsCampaign = {
-    createPausedCampaign: vi.fn(async () => ({
+    createPausedCampaign: vi.fn(async (_org: string, state: Record<string, unknown>) => ({
+      ...state,
       kind: 'google_ads_campaign',
-      campaignName: 'G',
       campaignId: 'g-1',
     })),
   };
   const metaAdsCampaign = {
-    createPausedCampaign: vi.fn(async () => ({
+    createPausedCampaign: vi.fn(async (_org: string, state: Record<string, unknown>) => ({
+      ...state,
       kind: 'meta_ads_campaign',
-      campaignName: 'M',
       campaignId: 'm-1',
       ads: [],
     })),
   };
   const mailchimpExecution = {
-    createDraftSequence: vi.fn(async () => ({
+    createDraftSequence: vi.fn(async (_ctx: unknown, state: Record<string, unknown>) => ({
+      ...state,
       kind: 'mailchimp_sequence',
-      sequenceName: 'Welcome',
-      emails: [{ subject: 'Hi' }],
       createdCampaigns: [{ id: 'c1', archiveUrl: 'https://mc/1' }],
     })),
   };
@@ -402,6 +416,27 @@ describe('approve() claims before writing', () => {
     expect(statusTransitions()[0]).toBe('executing');
   });
 
+  it('claims with a previewed precondition in the SQL itself', async () => {
+    // Structural rather than behavioural, deliberately.
+    //
+    // approve() also pre-checks the status with a plain read before claiming, and
+    // that read shadows the SQL guard in any single-threaded test: remove
+    // `AND status = 'previewed'` and every behavioural test still passes, as
+    // mutation testing confirmed.
+    //
+    // But the guard is the only thing that holds in the case it exists for — two
+    // callers both passing the pre-check, then both attempting the claim. That
+    // race is what 7400720 fixed, and it cannot be reproduced through this
+    // interface, so assert the precondition is present in the statement.
+    const f = makeFakes();
+    currentRow = row();
+    await service(f).approve('org-1', 'exec-1');
+
+    const claimSql = sqlIssued().find((s) => s.includes("SET status = 'executing'"))!;
+    expect(claimSql).toContain("status = 'previewed'");
+    expect(claimSql).toContain('RETURNING *');
+  });
+
   it('performs no external write when the claim is lost', async () => {
     // The critical assertion: a caller that loses the race must not reach the
     // platform. Without this, two approvals create two campaigns.
@@ -447,6 +482,163 @@ describe('approve() claims before writing', () => {
 // ---------------------------------------------------------------------------
 // State transitions on success and failure
 // ---------------------------------------------------------------------------
+
+/**
+ * `markExecuted` is now shared by all seven handlers, so its two variants need
+ * pinning. Getting `before_state` wrong is not cosmetic: `rollbackProductSeo`
+ * restores from it, so nulling it would make a product SEO change
+ * unrecoverable — silently, and only discovered when someone tried to undo.
+ */
+describe('markExecuted variants (shared by every handler)', () => {
+  function executedSql(): string {
+    return sqlIssued().find((s) => s.includes("SET status = 'executed'")) ?? '';
+  }
+  /**
+   * The success UPDATE specifically. Matching on `status = 'executed'` alone also
+   * catches unrelated queries whose parameters happen to contain that text.
+   */
+  function executedUpdate(): QueryCall {
+    // SQL is written as an indented template literal, so normalise before
+    // matching on the leading keyword.
+    const call = queryCalls.find((c) => {
+      const sql = c.sql.replace(/\s+/g, ' ').trim();
+      return sql.startsWith('UPDATE action_executions') && sql.includes("status = 'executed'");
+    });
+    if (!call) throw new Error('no executed UPDATE was issued');
+    return call;
+  }
+
+  it('product SEO preserves before_state, because rollback restores from it', async () => {
+    const f = makeFakes();
+    currentRow = row({ execution_type: 'update_product_seo' });
+    await service(f).approve('org-1', 'exec-1');
+    expect(executedSql()).toContain('before_state = COALESCE(before_state, proposed_state)');
+  });
+
+  it('product SEO stores the edited values as proposed_state, not the original', async () => {
+    // proposed_state becomes the record of what was actually applied.
+    const f = makeFakes();
+    currentRow = row();
+    await service(f).approve('org-1', 'exec-1', { seoTitle: 'Edited' });
+    const call = executedUpdate();
+    expect(JSON.stringify(call.params)).toContain('Edited');
+  });
+
+  it('product SEO leaves the existing summary untouched', async () => {
+    const f = makeFakes();
+    currentRow = row();
+    await service(f).approve('org-1', 'exec-1');
+    expect(executedSql()).toContain('summary = summary');
+  });
+
+  it('stamps executed_at and clears any previous error', async () => {
+    // executed_at drives "when did this happen" in the activity feed and the
+    // outcome measurement window; a stale error_message would keep showing a
+    // failure the user already resolved.
+    const f = makeFakes();
+    currentRow = row();
+    await service(f).approve('org-1', 'exec-1');
+    expect(executedSql()).toContain('executed_at = NOW()');
+    expect(executedSql()).toContain('error_message = NULL');
+  });
+
+  it('scopes the update to both id and organization', async () => {
+    // Without organization_id in the WHERE clause, a guessed execution id would
+    // let one tenant mark another tenant's execution executed.
+    const f = makeFakes();
+    currentRow = row();
+    await service(f).approve('org-1', 'exec-1');
+    expect(executedSql()).toMatch(/WHERE id = \$1 AND organization_id = \$2/);
+  });
+
+  it.each([
+    ['create_shopify_page', { kind: 'shopify_page', title: 'A', handle: 'a', bodyHtml: '<p>x</p>', seoTitle: 'A', seoDescription: 'd', isPublished: false }],
+    ['create_google_ads_campaign', { kind: 'google_ads_campaign', campaignName: 'G', campaignId: null }],
+    ['create_meta_ads_campaign', { kind: 'meta_ads_campaign', campaignName: 'M', campaignId: null, ads: [] }],
+  ])('%s nulls before_state — there is no prior state to restore', async (type, payload) => {
+    const f = makeFakes();
+    currentRow = row({ execution_type: type, proposed_state: payload });
+    await service(f).approve('org-1', 'exec-1');
+    expect(executedSql()).toContain('before_state = NULL');
+  });
+
+  it('create paths replace the summary with a link the user can follow', async () => {
+    const f = makeFakes();
+    currentRow = row({
+      execution_type: 'create_shopify_page',
+      proposed_state: {
+        kind: 'shopify_page',
+        title: 'About',
+        handle: 'about',
+        bodyHtml: '<p>x</p>',
+        seoTitle: 'About',
+        seoDescription: 'd',
+        isPublished: false,
+      },
+    });
+    await service(f).approve('org-1', 'exec-1');
+    const call = executedUpdate();
+    const summary = String(call.params.at(-1));
+    expect(summary).toMatch(/Shopify page/i);
+    expect(summary).toContain('/pages/about');
+  });
+
+  it('the Mailchimp summary always states that nothing is auto-sent', async () => {
+    // The load-bearing reassurance for an email integration.
+    const f = makeFakes();
+    currentRow = row({
+      platform: 'mailchimp',
+      execution_type: 'create_mailchimp_drafts',
+      proposed_state: {
+        kind: 'mailchimp_sequence',
+        sequenceName: 'Welcome',
+        emails: [{ subject: 'Hi', previewText: 'p', bodyHtml: '<p>h</p>' }],
+      },
+    });
+    await service(f).approve('org-1', 'exec-1');
+    const call = executedUpdate();
+    expect(String(call.params.at(-1))).toMatch(/never auto-sent|you send from Mailchimp/i);
+  });
+
+  it('saves a Meta campaign to the ad library before writing the audit row', async () => {
+    // Ordering preserved from the original: library first, audit second.
+    const f = makeFakes();
+    currentRow = row({
+      platform: 'meta_ads',
+      execution_type: 'create_meta_ads_campaign',
+      proposed_state: {
+        kind: 'meta_ads_campaign',
+        campaignName: 'M',
+        campaignId: null,
+        ads: [],
+      },
+    });
+    await service(f).approve('org-1', 'exec-1');
+    expect(f.adCampaignLibrary.upsertFromMetaState).toHaveBeenCalledTimes(1);
+    expect(
+      f.adCampaignLibrary.upsertFromMetaState.mock.invocationCallOrder[0]!
+    ).toBeLessThan(f.audit.recordExecutionWrite.mock.invocationCallOrder[0]!);
+  });
+
+  it('still completes when the ad library upsert fails', async () => {
+    // The campaign exists in Ads Manager regardless; reconciliation repairs the
+    // library later. A library error must not fail the execution.
+    const f = makeFakes();
+    f.adCampaignLibrary.upsertFromMetaState.mockRejectedValueOnce(new Error('library down'));
+    currentRow = row({
+      platform: 'meta_ads',
+      execution_type: 'create_meta_ads_campaign',
+      proposed_state: {
+        kind: 'meta_ads_campaign',
+        campaignName: 'M',
+        campaignId: null,
+        ads: [],
+      },
+    });
+    await expect(service(f).approve('org-1', 'exec-1')).resolves.toBeTruthy();
+    expect(statusTransitions()).toContain('executed');
+  });
+});
 
 describe('approve() state transitions', () => {
   it('reaches executed on success', async () => {
